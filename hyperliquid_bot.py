@@ -69,8 +69,10 @@ POLL_INTERVAL          = int(os.getenv('POLL_INTERVAL', '10'))
 PRICE_CHANGE_THRESHOLD = float(os.getenv('PRICE_CHANGE_THRESHOLD', '0.5'))
 MAX_SYMBOLS_DISPLAY    = int(os.getenv('MAX_SYMBOLS_DISPLAY', '20'))
 
-# DEX aggiuntivi: "" = perp standard, "xyz" = perp XYZ
-SUPPORTED_DEXS = ['xyz']
+# DEX aggiuntivi: lista separata da virgola nel .env
+# Es: SUPPORTED_DEXS=xyz        oppure SUPPORTED_DEXS=xyz,flx,vntl
+# "" = perp standard (sempre incluso), "xyz" = perp XYZ ecc.
+SUPPORTED_DEXS = [d.strip() for d in os.getenv('SUPPORTED_DEXS', 'xyz').split(',') if d.strip()]
 
 if not TELEGRAM_TOKEN:
     logger.error("❌ TELEGRAM_TOKEN non trovato nel file .env")
@@ -89,6 +91,7 @@ class HyperliquidPriceMonitor:
         self.subscribers:       Dict[int, Set[str]] = {}
         self.last_prices:       Dict[str, float]    = {}  # aggiornato ogni poll
         self.alert_base_prices: Dict[str, float]    = {}  # riferimento alert: impostato al subscribe, aggiornato dopo ogni alert
+        self.user_thresholds:   Dict[int, float]    = {}  # soglia per-utente, fallback a PRICE_CHANGE_THRESHOLD globale
         self.session: Optional[aiohttp.ClientSession] = None
 
     async def init_session(self):
@@ -181,7 +184,7 @@ class HyperliquidPriceMonitor:
     async def get_all_symbols(self) -> dict:
         result: dict = {'perps': [], 'spot': [], 'dex_perps': {}}
         data = await self._allMids("")
-        result['perps'] = sorted(k for k in data if '/' not in k and ':' not in k)
+        result['perps'] = sorted(k for k in data if '/' not in k and ':' not in k and not k.startswith('@'))
         result['spot']  = sorted(k for k in data if '/' in k)
         for dex in SUPPORTED_DEXS:
             dex_data = await self._allMids(dex)
@@ -190,6 +193,14 @@ class HyperliquidPriceMonitor:
                     k.split(':', 1)[1] for k in dex_data if ':' in k
                 )
         return result
+
+    def get_threshold(self, chat_id: int) -> float:
+        """Restituisce la soglia dell'utente, o quella globale se non impostata."""
+        return self.user_thresholds.get(chat_id, PRICE_CHANGE_THRESHOLD)
+
+    def set_threshold(self, chat_id: int, threshold: float):
+        self.user_thresholds[chat_id] = threshold
+        logger.info(f"Chat {chat_id} soglia impostata a {threshold}%")
 
     def add_subscriber(self, chat_id: int, symbol: str):
         self.subscribers.setdefault(chat_id, set()).add(symbol.upper())
@@ -241,6 +252,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/subscribe SYMBOL — inizia a monitorare\n"
         "/unsubscribe SYMBOL — smetti di monitorare\n"
         "/list — le tue sottoscrizioni\n"
+        "/threshold [X|reset] — soglia alert personale\n"
         "/symbols — simboli disponibili\n"
         "/stats — statistiche bot\n"
         "/help — questo messaggio\n"
@@ -314,7 +326,7 @@ async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"✅ Monitoro *{sym}* per te!\n"
         f"{emoji} Tipo: {label}\n"
         f"Prezzo attuale: ${price_val:,.6f}\n"
-        f"Soglia notifiche: ±{PRICE_CHANGE_THRESHOLD}%",
+        f"Soglia notifiche: ±{monitor.get_threshold(chat_id)}%",
         parse_mode='Markdown'
     )
 
@@ -336,6 +348,46 @@ async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     monitor.remove_subscriber(chat_id, sym)
     await update.message.reply_text(f"✅ Non monitoro più *{sym}*", parse_mode='Markdown')
 
+async def threshold_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+
+    if not context.args:
+        current = monitor.get_threshold(chat_id)
+        is_custom = chat_id in monitor.user_thresholds
+        src = "personalizzata" if is_custom else "globale (default)"
+        await update.message.reply_text(
+            f"📊 Soglia attuale: ±{current}% ({src})\n\n"
+            f"Per cambiarla: /threshold 1.5\n"
+            f"Per ripristinare il default: /threshold reset"
+        )
+        return
+
+    arg = context.args[0].lower()
+
+    if arg == 'reset':
+        monitor.user_thresholds.pop(chat_id, None)
+        await update.message.reply_text(
+            f"✅ Soglia ripristinata al default globale: ±{PRICE_CHANGE_THRESHOLD}%"
+        )
+        return
+
+    try:
+        value = float(arg.replace(',', '.'))
+        if value <= 0 or value > 100:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Valore non valido. Usa un numero positivo, es: /threshold 1.5\n"
+            "Per ripristinare il default: /threshold reset"
+        )
+        return
+
+    monitor.set_threshold(chat_id, value)
+    await update.message.reply_text(
+        f"✅ Soglia aggiornata a ±{value}%\n"
+        f"Gli alert scatteranno quando il prezzo varia di più del {value}% dal riferimento."
+    )
+
 async def list_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     subs = monitor.get_subscriptions(chat_id)
@@ -347,7 +399,8 @@ async def list_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # Fetch prezzi correnti in batch
     all_prices = await monitor.fetch_all_prices()
 
-    msg = "📋 *Le tue sottoscrizioni:*\n\n"
+    threshold = monitor.get_threshold(chat_id)
+    msg = f"📋 *Le tue sottoscrizioni* (soglia: ±{threshold}%):\n\n"
     for sym in sorted(subs):
         base    = monitor.alert_base_prices.get(sym)   # prezzo al subscribe (o ultimo alert)
         current_info = all_prices.get(sym)
@@ -413,7 +466,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📈 Simboli monitorati: {len(monitored)} — {', '.join(sorted(monitored)) if monitored else 'nessuno'}\n"
         f"💾 Prezzi in cache: {len(monitor.last_prices)}\n"
         f"⏱️ Intervallo polling: {POLL_INTERVAL}s\n"
-        f"📊 Soglia notifiche: ±{PRICE_CHANGE_THRESHOLD}%\n"
+        f"📊 Soglia notifiche: ±{monitor.get_threshold(update.effective_chat.id)}% (globale: ±{PRICE_CHANGE_THRESHOLD}%)\n"
         f"🔗 DEX supportati: {', '.join(d.upper() for d in SUPPORTED_DEXS)}\n"
         f"📁 Log: {LOG_FILE}\n"
         f"⚙️ Config: {env_file}\n"
@@ -448,28 +501,35 @@ async def price_polling_task(application: Application):
 
                     if base is not None:
                         pct = (price_val - base) / base * 100
-                        if abs(pct) >= PRICE_CHANGE_THRESHOLD:
-                            logger.info(f"ALERT {sym} ({label}): {base:.6f} -> {price_val:.6f} ({pct:+.2f}%)")
-                            arrow = "📈" if price_val > base else "📉"
-                            alert = (
-                                f"{arrow} *{sym}* Alert! {emoji}\n\n"
-                                f"Tipo: {label}\n"
-                                f"Riferimento: ${base:,.6f}\n"
-                                f"Attuale: ${price_val:,.6f}\n"
-                                f"Cambio: {pct:+.2f}%\n"
-                                f"⏰ {datetime.now().strftime('%H:%M:%S')}"
-                            )
-                            for chat_id, syms in monitor.subscribers.items():
-                                if sym in syms:
-                                    try:
-                                        await application.bot.send_message(
-                                            chat_id=chat_id,
-                                            text=alert,
-                                            parse_mode='Markdown'
-                                        )
-                                    except Exception as e:
-                                        logger.error(f"Errore invio a {chat_id}: {e}")
-                            # Aggiorna il riferimento SOLO dopo un alert
+                        alert_sent = False
+                        for chat_id, syms in monitor.subscribers.items():
+                            if sym not in syms:
+                                continue
+                            threshold = monitor.get_threshold(chat_id)
+                            if abs(pct) >= threshold:
+                                if not alert_sent:
+                                    logger.info(f"ALERT {sym} ({label}): {base:.6f} -> {price_val:.6f} ({pct:+.2f}%)")
+                                arrow = "📈" if price_val > base else "📉"
+                                alert = (
+                                    f"{arrow} *{sym}* Alert! {emoji}\n\n"
+                                    f"Tipo: {label}\n"
+                                    f"Riferimento: ${base:,.6f}\n"
+                                    f"Attuale: ${price_val:,.6f}\n"
+                                    f"Cambio: {pct:+.2f}%\n"
+                                    f"Soglia: ±{threshold}%\n"
+                                    f"⏰ {datetime.now().strftime('%H:%M:%S')}"
+                                )
+                                try:
+                                    await application.bot.send_message(
+                                        chat_id=chat_id,
+                                        text=alert,
+                                        parse_mode='Markdown'
+                                    )
+                                    alert_sent = True
+                                except Exception as e:
+                                    logger.error(f"Errore invio a {chat_id}: {e}")
+                        # Aggiorna il riferimento SOLO se almeno un alert è stato inviato
+                        if alert_sent:
                             monitor.alert_base_prices[sym] = price_val
 
                     monitor.last_prices[sym] = price_val  # aggiornato sempre
@@ -505,6 +565,7 @@ def main():
     app.add_handler(CommandHandler("price",       price))
     app.add_handler(CommandHandler("subscribe",   subscribe))
     app.add_handler(CommandHandler("unsubscribe", unsubscribe))
+    app.add_handler(CommandHandler("threshold",   threshold_command))
     app.add_handler(CommandHandler("list",        list_subscriptions))
     app.add_handler(CommandHandler("symbols",     symbols_command))
     app.add_handler(CommandHandler("stats",       stats))
