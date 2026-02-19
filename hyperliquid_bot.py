@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import logging.handlers
 import os
 import sys
 from typing import Dict, Set, Optional, Tuple
@@ -17,7 +18,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 if len(sys.argv) > 1:
     env_file = sys.argv[1]
 else:
-    env_file = 'miobot.env'
+    env_file = 'opentradenet.env'
 
 env_path = Path('.') / env_file
 
@@ -28,11 +29,39 @@ if not env_path.exists():
 load_dotenv(dotenv_path=env_path)
 print(f"✅ Caricato file di configurazione: {env_file}")
 
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+# ---------------------------------------------------------------------------
+# Logging: console + file con rotazione giornaliera (7 giorni)
+# ---------------------------------------------------------------------------
+
+LOG_DIR  = Path(os.getenv('LOG_DIR', 'logs'))
+LOG_DIR.mkdir(exist_ok=True)
+LOG_FILE = LOG_DIR / 'hyperliquid_bot.log'
+
+fmt = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(fmt)
+
+file_handler = logging.handlers.TimedRotatingFileHandler(
+    LOG_FILE,
+    when='midnight',
+    interval=1,
+    backupCount=7,
+    encoding='utf-8'
 )
+file_handler.setFormatter(fmt)
+file_handler.suffix = '%Y-%m-%d'
+
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+root_logger.addHandler(console_handler)
+root_logger.addHandler(file_handler)
+
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Configurazione
+# ---------------------------------------------------------------------------
 
 TELEGRAM_TOKEN         = os.getenv('TELEGRAM_TOKEN')
 HYPERLIQUID_API        = os.getenv('HYPERLIQUID_API', 'https://api.hyperliquid.xyz/info')
@@ -40,9 +69,7 @@ POLL_INTERVAL          = int(os.getenv('POLL_INTERVAL', '10'))
 PRICE_CHANGE_THRESHOLD = float(os.getenv('PRICE_CHANGE_THRESHOLD', '0.5'))
 MAX_SYMBOLS_DISPLAY    = int(os.getenv('MAX_SYMBOLS_DISPLAY', '20'))
 
-# DEX aggiuntivi da interrogare con allMids.
-# I perp standard usano dex="", quelli xyz usano dex="xyz".
-# Aggiungi qui altri dex se necessario: ['xyz', 'flx', 'vntl']
+# DEX aggiuntivi: "" = perp standard, "xyz" = perp XYZ
 SUPPORTED_DEXS = ['xyz']
 
 if not TELEGRAM_TOKEN:
@@ -50,6 +77,7 @@ if not TELEGRAM_TOKEN:
     sys.exit(1)
 
 logger.info(f"Config: POLL={POLL_INTERVAL}s THRESHOLD={PRICE_CHANGE_THRESHOLD}% DEX={SUPPORTED_DEXS}")
+logger.info(f"Log file: {LOG_FILE.resolve()}")
 
 
 # ---------------------------------------------------------------------------
@@ -58,8 +86,9 @@ logger.info(f"Config: POLL={POLL_INTERVAL}s THRESHOLD={PRICE_CHANGE_THRESHOLD}% 
 
 class HyperliquidPriceMonitor:
     def __init__(self):
-        self.subscribers: Dict[int, Set[str]] = {}
-        self.last_prices: Dict[str, float] = {}
+        self.subscribers:       Dict[int, Set[str]] = {}
+        self.last_prices:       Dict[str, float]    = {}  # aggiornato ogni poll
+        self.alert_base_prices: Dict[str, float]    = {}  # riferimento alert: impostato al subscribe, aggiornato dopo ogni alert
         self.session: Optional[aiohttp.ClientSession] = None
 
     async def init_session(self):
@@ -75,19 +104,18 @@ class HyperliquidPriceMonitor:
 
     async def _allMids(self, dex: str) -> dict:
         """
-        Chiama POST /info  {"type": "allMids", "dex": dex}
-          dex=""    -> perp standard  (mids + spotMids)
-          dex="xyz" -> perp xyz       (mids)
-        Ritorna il dict della risposta, vuoto in caso di errore.
+        POST /info {"type": "allMids", "dex": dex}
+          dex=""    -> dict piatto {"BTC": "price", "PURR/USDC": "price", ...}
+          dex="xyz" -> dict piatto {"xyz:MSTR": "price", ...}
         """
         await self.init_session()
-        payload = {"type": "allMids", "dex": dex}
         try:
-            async with self.session.post(HYPERLIQUID_API, json=payload) as resp:
+            async with self.session.post(
+                HYPERLIQUID_API,
+                json={"type": "allMids", "dex": dex}
+            ) as resp:
                 if resp.status == 200:
-                    data = await resp.json()
-                    logger.debug(f"allMids dex='{dex}' -> {list(data.keys())}")
-                    return data
+                    return await resp.json()
                 logger.error(f"allMids dex='{dex}' HTTP {resp.status}")
                 return {}
         except asyncio.TimeoutError:
@@ -97,69 +125,75 @@ class HyperliquidPriceMonitor:
             logger.error(f"allMids dex='{dex}' errore: {e}")
             return {}
 
+    async def fetch_all_prices(self) -> Dict[str, Tuple[float, str, Optional[str]]]:
+        """
+        Recupera TUTTI i prezzi in batch (2 chiamate HTTP totali).
+        Ritorna: { symbol -> (prezzo, tipo, dex_label) }
+        """
+        prices: Dict[str, Tuple[float, str, Optional[str]]] = {}
+
+        # Perp standard + spot
+        data = await self._allMids("")
+        for key, val in data.items():
+            try:
+                price = float(val)
+            except (ValueError, TypeError):
+                continue
+            if '/' in key:
+                sym = key.split('/')[0]
+                prices[sym] = (price, 'SPOT', None)
+            elif ':' not in key:
+                prices[key] = (price, 'PERP', None)
+
+        # Perp DEX
+        for dex in SUPPORTED_DEXS:
+            dex_data = await self._allMids(dex)
+            for key, val in dex_data.items():
+                if ':' not in key:
+                    continue
+                try:
+                    price = float(val)
+                except (ValueError, TypeError):
+                    continue
+                sym = key.split(':', 1)[1]
+                prices[sym] = (price, 'PERP', dex.upper())
+
+        return prices
+
     async def get_price(self, symbol: str) -> Optional[Tuple[float, str, Optional[str]]]:
-        """
-        Cerca il prezzo di symbol in tutti i mercati.
-        Ritorna: (prezzo, tipo, dex_label)
-          tipo      = 'PERP' | 'SPOT'
-          dex_label = None per perp standard, 'XYZ' ecc. per dex perp
-        """
+        """Prezzo singolo (usato da /price e /subscribe)."""
         sym = symbol.upper()
 
-        # 1. Perp standard + spot -> dex=""
-        # Risposta: dict piatto {"BTC": "66873.5", "PURR/USDC": "0.067", ...}
-        # - perp standard: chiave senza "/"
-        # - spot: chiave con "/USDC"
         data = await self._allMids("")
-
-        # Perp standard (es: "BTC")
         if sym in data:
             return (float(data[sym]), 'PERP', None)
-
-        # Spot: prova "PURR" -> cerca "PURR/USDC", oppure direttamente "PURR/USDC"
         if f"{sym}/USDC" in data:
             return (float(data[f"{sym}/USDC"]), 'SPOT', None)
-        if sym in data:  # chiave esatta con slash già incluso (es: utente scrive "PURR/USDC")
-            return (float(data[sym]), 'SPOT', None)
 
-        # 2. Perp DEX -> dex="xyz" ecc.
-        # La risposta è un dict piatto con chiavi "xyz:MSTR", "xyz:TSLA" ecc.
         for dex in SUPPORTED_DEXS:
-            dex_mids = await self._allMids(dex)
-            full_key = f"{dex}:{sym}"
-            if full_key in dex_mids:
-                return (float(dex_mids[full_key]), 'PERP', dex.upper())
+            dex_data = await self._allMids(dex)
+            if f"{dex}:{sym}" in dex_data:
+                return (float(dex_data[f"{dex}:{sym}"]), 'PERP', dex.upper())
 
-        logger.warning(f"Simbolo {sym} non trovato in nessun mercato")
+        logger.warning(f"Simbolo {sym} non trovato")
         return None
 
     async def get_all_symbols(self) -> dict:
-        """
-        Ritorna: {'perps': [...], 'spot': [...], 'dex_perps': {dex: [...]}}
-        """
         result: dict = {'perps': [], 'spot': [], 'dex_perps': {}}
-
-        # dex="" -> dict piatto {"BTC": "price", "PURR/USDC": "price", "@1": "price", ...}
-        # perp standard: chiavi senza "/" e senza ":"
-        # spot: chiavi con "/"
         data = await self._allMids("")
         result['perps'] = sorted(k for k in data if '/' not in k and ':' not in k)
         result['spot']  = sorted(k for k in data if '/' in k)
-
         for dex in SUPPORTED_DEXS:
-            dex_mids = await self._allMids(dex)
-            if dex_mids:
-                # Rimuove il prefisso "xyz:" per mostrare solo il nome della coin
-                clean = sorted(k.split(':', 1)[1] for k in dex_mids.keys() if ':' in k)
-                result['dex_perps'][dex.upper()] = clean
-
+            dex_data = await self._allMids(dex)
+            if dex_data:
+                result['dex_perps'][dex.upper()] = sorted(
+                    k.split(':', 1)[1] for k in dex_data if ':' in k
+                )
         return result
-
-    # --- Subscriber management ---
 
     def add_subscriber(self, chat_id: int, symbol: str):
         self.subscribers.setdefault(chat_id, set()).add(symbol.upper())
-        logger.info(f"Chat {chat_id} sottoscritta a {symbol}")
+        logger.info(f"Chat {chat_id} sottoscritta a {symbol.upper()}")
 
     def remove_subscriber(self, chat_id: int, symbol: str):
         if chat_id in self.subscribers:
@@ -185,7 +219,6 @@ monitor = HyperliquidPriceMonitor()
 # ---------------------------------------------------------------------------
 
 def market_label(market_type: str, dex_name: Optional[str]) -> Tuple[str, str]:
-    """Ritorna (emoji, label)."""
     if market_type == 'PERP':
         return ("🔥", f"PERP ({dex_name})") if dex_name else ("⚡", "PERP")
     return "💎", "SPOT"
@@ -219,16 +252,16 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Uso: /price SYMBOL  (es: /price BTC  /price MSTR  /price PURR)")
+        await update.message.reply_text("Uso: /price SYMBOL  (es: /price BTC, /price MSTR, /price PURR)")
         return
 
     sym = context.args[0].upper()
     await update.message.reply_text(f"🔍 Recupero prezzo di {sym}...")
-    result = await monitor.get_price(sym)
 
+    result = await monitor.get_price(sym)
     if not result:
         await update.message.reply_text(
-            f"❌ Simbolo *{sym}* non trovato.\nUsa /symbols per vedere i simboli disponibili.",
+            f"❌ *{sym}* non trovato. Usa /symbols per i simboli disponibili.",
             parse_mode='Markdown'
         )
         return
@@ -237,9 +270,9 @@ async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     emoji, label = market_label(mtype, dex)
 
     variation_msg = ""
-    if sym in monitor.last_prices:
-        old = monitor.last_prices[sym]
-        pct = ((price_val - old) / old * 100) if old else 0
+    old = monitor.last_prices.get(sym)
+    if old:
+        pct = (price_val - old) / old * 100
         arrow = "📈" if price_val > old else "📉" if price_val < old else "➡️"
         variation_msg = f"\n{arrow} Variazione: {pct:+.2f}%"
 
@@ -264,14 +297,18 @@ async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not result:
         await update.message.reply_text(
-            f"❌ Simbolo *{sym}* non trovato.\nUsa /symbols per vedere i simboli disponibili.",
+            f"❌ *{sym}* non trovato. Usa /symbols per i simboli disponibili.",
             parse_mode='Markdown'
         )
         return
 
     price_val, mtype, dex = result
     emoji, label = market_label(mtype, dex)
+
     monitor.add_subscriber(chat_id, sym)
+    # Salva il prezzo base al momento del subscribe come riferimento per gli alert
+    monitor.last_prices[sym]       = price_val
+    monitor.alert_base_prices[sym] = price_val
 
     await update.message.reply_text(
         f"✅ Monitoro *{sym}* per te!\n"
@@ -291,7 +328,7 @@ async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if sym not in monitor.get_subscriptions(chat_id):
         await update.message.reply_text(
-            f"❌ Non stai monitorando *{sym}*. Usa /list per vedere le tue sottoscrizioni.",
+            f"❌ Non stai monitorando *{sym}*. Usa /list.",
             parse_mode='Markdown'
         )
         return
@@ -307,10 +344,28 @@ async def list_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("📋 Nessuna sottoscrizione attiva.\nUsa /subscribe SYMBOL per iniziare!")
         return
 
+    # Fetch prezzi correnti in batch
+    all_prices = await monitor.fetch_all_prices()
+
     msg = "📋 *Le tue sottoscrizioni:*\n\n"
     for sym in sorted(subs):
-        p = monitor.last_prices.get(sym)
-        msg += f"• {sym} — ${p:,.6f}\n" if p else f"• {sym}\n"
+        base    = monitor.alert_base_prices.get(sym)   # prezzo al subscribe (o ultimo alert)
+        current_info = all_prices.get(sym)
+        current = current_info[0] if current_info else monitor.last_prices.get(sym)
+
+        if base and current:
+            pct   = (current - base) / base * 100
+            arrow = "📈" if pct > 0 else "📉" if pct < 0 else "➡️"
+            msg += (
+                f"• *{sym}*\n"
+                f"  Riferimento: ${base:,.6f}\n"
+                f"  Attuale:     ${current:,.6f}  {arrow} {pct:+.2f}%\n\n"
+            )
+        elif current:
+            msg += f"• *{sym}* — ${current:,.6f}\n\n"
+        else:
+            msg += f"• *{sym}* — prezzo non ancora disponibile\n\n"
+
     await update.message.reply_text(msg, parse_mode='Markdown')
 
 async def symbols_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -350,51 +405,57 @@ async def symbols_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode='Markdown')
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    monitored = monitor.get_all_monitored_symbols()
+    # Usa parse_mode=None per evitare problemi con path che contengono caratteri speciali Markdown
     msg = (
-        "📊 *Statistiche Bot*\n\n"
+        "📊 Statistiche Bot\n\n"
         f"👥 Utenti attivi: {len(monitor.subscribers)}\n"
-        f"📈 Simboli monitorati: {len(monitor.get_all_monitored_symbols())}\n"
+        f"📈 Simboli monitorati: {len(monitored)} — {', '.join(sorted(monitored)) if monitored else 'nessuno'}\n"
         f"💾 Prezzi in cache: {len(monitor.last_prices)}\n"
         f"⏱️ Intervallo polling: {POLL_INTERVAL}s\n"
         f"📊 Soglia notifiche: ±{PRICE_CHANGE_THRESHOLD}%\n"
-        f"🔗 DEX: {', '.join(d.upper() for d in SUPPORTED_DEXS)}\n"
+        f"🔗 DEX supportati: {', '.join(d.upper() for d in SUPPORTED_DEXS)}\n"
+        f"📁 Log: {LOG_FILE}\n"
         f"⚙️ Config: {env_file}\n"
     )
-    await update.message.reply_text(msg, parse_mode='Markdown')
+    await update.message.reply_text(msg)
 
 
 # ---------------------------------------------------------------------------
-# Polling task
+# Polling task — BATCH: 2 chiamate HTTP per tutti i simboli monitorati
 # ---------------------------------------------------------------------------
 
 async def price_polling_task(application: Application):
-    logger.info("🚀 Task di polling prezzi avviato")
+    logger.info("🚀 Task di polling avviato (modalità batch)")
 
     while True:
         try:
-            all_symbols = monitor.get_all_monitored_symbols()
+            monitored = monitor.get_all_monitored_symbols()
 
-            if all_symbols:
-                for sym in all_symbols:
-                    result = await monitor.get_price(sym)
-                    if not result:
-                        await asyncio.sleep(0.5)
+            if monitored:
+                # Unica fetch batch per tutti i prezzi
+                all_prices = await monitor.fetch_all_prices()
+                logger.debug(f"Batch fetch: {len(all_prices)} prezzi ricevuti, monitoro {len(monitored)} simboli")
+
+                for sym in monitored:
+                    if sym not in all_prices:
+                        logger.warning(f"Simbolo {sym} non trovato nel batch")
                         continue
 
-                    price_val, mtype, dex = result
+                    price_val, mtype, dex = all_prices[sym]
                     emoji, label = market_label(mtype, dex)
-                    old = monitor.last_prices.get(sym)
+                    base = monitor.alert_base_prices.get(sym)  # prezzo di riferimento alert
 
-                    if old is not None:
-                        pct = ((price_val - old) / old * 100) if old else 0
+                    if base is not None:
+                        pct = (price_val - base) / base * 100
                         if abs(pct) >= PRICE_CHANGE_THRESHOLD:
-                            logger.info(f"{sym} ({label}): {old:.6f} -> {price_val:.6f} ({pct:+.2f}%)")
-                            arrow = "📈" if price_val > old else "📉"
+                            logger.info(f"ALERT {sym} ({label}): {base:.6f} -> {price_val:.6f} ({pct:+.2f}%)")
+                            arrow = "📈" if price_val > base else "📉"
                             alert = (
                                 f"{arrow} *{sym}* Alert! {emoji}\n\n"
                                 f"Tipo: {label}\n"
-                                f"Vecchio: ${old:,.6f}\n"
-                                f"Nuovo: ${price_val:,.6f}\n"
+                                f"Riferimento: ${base:,.6f}\n"
+                                f"Attuale: ${price_val:,.6f}\n"
                                 f"Cambio: {pct:+.2f}%\n"
                                 f"⏰ {datetime.now().strftime('%H:%M:%S')}"
                             )
@@ -408,9 +469,10 @@ async def price_polling_task(application: Application):
                                         )
                                     except Exception as e:
                                         logger.error(f"Errore invio a {chat_id}: {e}")
+                            # Aggiorna il riferimento SOLO dopo un alert
+                            monitor.alert_base_prices[sym] = price_val
 
-                    monitor.last_prices[sym] = price_val
-                    await asyncio.sleep(0.5)
+                    monitor.last_prices[sym] = price_val  # aggiornato sempre
 
             await asyncio.sleep(POLL_INTERVAL)
 
