@@ -59,6 +59,10 @@ root_logger.addHandler(file_handler)
 
 logger = logging.getLogger(__name__)
 
+# Silenzia i log di httpx e httpcore (usati internamente da python-telegram-bot)
+logging.getLogger('httpx').setLevel(logging.WARNING)
+logging.getLogger('httpcore').setLevel(logging.WARNING)
+
 # ---------------------------------------------------------------------------
 # Configurazione
 # ---------------------------------------------------------------------------
@@ -73,6 +77,12 @@ MAX_SYMBOLS_DISPLAY    = int(os.getenv('MAX_SYMBOLS_DISPLAY', '20'))
 # Es: SUPPORTED_DEXS=xyz        oppure SUPPORTED_DEXS=xyz,flx,vntl
 # "" = perp standard (sempre incluso), "xyz" = perp XYZ ecc.
 SUPPORTED_DEXS = [d.strip() for d in os.getenv('SUPPORTED_DEXS', 'xyz').split(',') if d.strip()]
+
+# Simboli fissi per pricespike: lista separata da virgola nel .env
+# Es: SPIKE_EXTRA_SYMBOLS=BTC,SOL,ETH,XRP,SUI,HYPER
+# I simboli xyz vengono aggiunti automaticamente a runtime dal batch
+SPIKE_EXTRA_SYMBOLS    = [s.strip().upper() for s in os.getenv('SPIKE_EXTRA_SYMBOLS', 'BTC,SOL,ETH,XRP,SUI,HYPER').split(',') if s.strip()]
+SPIKE_THRESHOLD        = float(os.getenv('SPIKE_THRESHOLD', '1.0'))   # soglia % poll-to-poll per pricespike
 
 if not TELEGRAM_TOKEN:
     logger.error("❌ TELEGRAM_TOKEN non trovato nel file .env")
@@ -92,18 +102,20 @@ class HyperliquidPriceMonitor:
         self.last_prices:       Dict[str, float]    = {}  # aggiornato ogni poll
         self.alert_base_prices: Dict[str, float]    = {}  # riferimento alert: impostato al subscribe, aggiornato dopo ogni alert
         self.user_thresholds:   Dict[int, float]    = {}  # soglia per-utente, fallback a PRICE_CHANGE_THRESHOLD globale
+        self.spike_subscribers: Set[int]             = set()  # chat_id iscritti a pricespike
+        self.spike_prev_prices: Dict[str, float]     = {}     # prezzi poll precedente per pricespike
         self.session: Optional[aiohttp.ClientSession] = None
 
     async def init_session(self):
         if self.session is None:
             self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
-            logger.info("Sessione HTTP inizializzata")
+            logger.debug("Sessione HTTP inizializzata")
 
     async def close_session(self):
         if self.session:
             await self.session.close()
             self.session = None
-            logger.info("Sessione HTTP chiusa")
+            logger.debug("Sessione HTTP chiusa")
 
     async def _allMids(self, dex: str) -> dict:
         """
@@ -178,7 +190,7 @@ class HyperliquidPriceMonitor:
             if f"{dex}:{sym}" in dex_data:
                 return (float(dex_data[f"{dex}:{sym}"]), 'PERP', dex.upper())
 
-        logger.warning(f"Simbolo {sym} non trovato")
+        logger.debug(f"Simbolo {sym} non trovato")
         return None
 
     async def get_all_symbols(self) -> dict:
@@ -253,6 +265,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/unsubscribe SYMBOL — smetti di monitorare\n"
         "/list — le tue sottoscrizioni\n"
         "/threshold [X|reset] — soglia alert personale\n"
+        "/pricespike [N|status] — spike improvvisi poll-to-poll\n"
         "/symbols — simboli disponibili\n"
         "/stats — statistiche bot\n"
         "/help — questo messaggio\n"
@@ -347,6 +360,77 @@ async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     monitor.remove_subscriber(chat_id, sym)
     await update.message.reply_text(f"✅ Non monitoro più *{sym}*", parse_mode='Markdown')
+
+async def pricespike(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /pricespike        — attiva/disattiva il monitoraggio spike
+    /pricespike status — mostra stato e soglia
+    /pricespike N      — imposta soglia personalizzata (es: /pricespike 2.0)
+    """
+    chat_id = update.effective_chat.id
+    arg = context.args[0].lower() if context.args else ''
+
+    if arg == 'status':
+        active = chat_id in monitor.spike_subscribers
+        stato  = "✅ ATTIVO" if active else "⏸ NON ATTIVO"
+        thresh = monitor.user_thresholds.get(chat_id, SPIKE_THRESHOLD)
+        await update.message.reply_text(
+            f"⚡ *PriceSpike* — {stato}\n\n"
+            f"Soglia: ±{thresh}% per poll ({POLL_INTERVAL}s)\n"
+            f"Simboli monitorati: tutti XYZ + {', '.join(SPIKE_EXTRA_SYMBOLS)}\n\n"
+            f"Usa /pricespike per attivare/disattivare.",
+            parse_mode='Markdown'
+        )
+        return
+
+    if arg and arg not in ('on', 'off'):
+        # Prova a interpretarlo come soglia numerica
+        try:
+            value = float(arg.replace(',', '.'))
+            if value <= 0 or value > 100:
+                raise ValueError
+            monitor.user_thresholds[chat_id] = value
+            await update.message.reply_text(
+                f"✅ Soglia spike aggiornata a ±{value}% per poll\n"
+                f"Usa /pricespike per attivare/disattivare."
+            )
+            return
+        except ValueError:
+            await update.message.reply_text(
+                "❌ Argomento non valido.\n"
+                "/pricespike — attiva/disattiva\n"
+                "/pricespike 2.0 — imposta soglia\n"
+                "/pricespike status — mostra stato"
+            )
+            return
+
+    # On / off / toggle
+    if arg == 'off':
+        monitor.spike_subscribers.discard(chat_id)
+        logger.info(f"Chat {chat_id} disattivato pricespike")
+        await update.message.reply_text("⏸ *PriceSpike disattivato.*", parse_mode='Markdown')
+        return
+
+    if arg == 'on' or chat_id not in monitor.spike_subscribers:
+        monitor.spike_subscribers.add(chat_id)
+        logger.info(f"Chat {chat_id} attivato pricespike")
+        thresh = monitor.user_thresholds.get(chat_id, SPIKE_THRESHOLD)
+        await update.message.reply_text(
+            f"⚡ *PriceSpike attivato!*\n\n"
+            f"Ti avviso se un prezzo varia di ±{thresh}% "
+            f"da un poll all'altro ({POLL_INTERVAL}s).\n"
+            f"Monitorati: tutti gli XYZ + {', '.join(SPIKE_EXTRA_SYMBOLS)}\n\n"
+            f"Usa /pricespike off per disattivare, /pricespike status per dettagli.",
+            parse_mode='Markdown'
+        )
+    else:
+        # già attivo e nessun argomento: informa l'utente
+        thresh = monitor.user_thresholds.get(chat_id, SPIKE_THRESHOLD)
+        await update.message.reply_text(
+            f"⚡ *PriceSpike già attivo* (soglia ±{thresh}%)\n"
+            f"Usa /pricespike off per disattivare.",
+            parse_mode='Markdown'
+        )
 
 async def threshold_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -468,6 +552,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⏱️ Intervallo polling: {POLL_INTERVAL}s\n"
         f"📊 Soglia notifiche: ±{monitor.get_threshold(update.effective_chat.id)}% (globale: ±{PRICE_CHANGE_THRESHOLD}%)\n"
         f"🔗 DEX supportati: {', '.join(d.upper() for d in SUPPORTED_DEXS)}\n"
+        f"⚡ PriceSpike: {'attivo' if update.effective_chat.id in monitor.spike_subscribers else 'non attivo'} (soglia ±{monitor.user_thresholds.get(update.effective_chat.id, SPIKE_THRESHOLD)}% per poll)\n"
         f"📁 Log: {LOG_FILE}\n"
         f"⚙️ Config: {env_file}\n"
     )
@@ -485,6 +570,7 @@ async def price_polling_task(application: Application):
         try:
             monitored = monitor.get_all_monitored_symbols()
 
+            all_prices: Dict[str, Tuple[float, str, Optional[str]]] = {}
             if monitored:
                 # Unica fetch batch per tutti i prezzi
                 all_prices = await monitor.fetch_all_prices()
@@ -492,7 +578,7 @@ async def price_polling_task(application: Application):
 
                 for sym in monitored:
                     if sym not in all_prices:
-                        logger.warning(f"Simbolo {sym} non trovato nel batch")
+                        logger.debug(f"Simbolo {sym} non trovato nel batch")
                         continue
 
                     price_val, mtype, dex = all_prices[sym]
@@ -534,6 +620,50 @@ async def price_polling_task(application: Application):
 
                     monitor.last_prices[sym] = price_val  # aggiornato sempre
 
+            # --- PRICESPIKE: confronto poll-to-poll su lista fissa ---
+            if monitor.spike_subscribers:
+                # Costruisce la lista spike: extra fissi + tutti i simboli xyz dal batch
+                xyz_syms = set()
+                if all_prices:
+                    xyz_syms = {sym for sym, (_, _, dex) in all_prices.items() if dex and dex.upper() == 'XYZ'}
+                spike_symbols = xyz_syms | set(SPIKE_EXTRA_SYMBOLS)
+
+                # Usa all_prices se già fetchato, altrimenti fetcha ora
+                prices_batch = all_prices if all_prices else await monitor.fetch_all_prices()
+
+                for sym in spike_symbols:
+                    if sym not in prices_batch:
+                        continue
+                    price_val, mtype, dex = prices_batch[sym]
+                    prev = monitor.spike_prev_prices.get(sym)
+
+                    if prev is not None and prev > 0:
+                        pct = (price_val - prev) / prev * 100
+                        for chat_id in monitor.spike_subscribers:
+                            thresh = monitor.user_thresholds.get(chat_id, SPIKE_THRESHOLD)
+                            if abs(pct) >= thresh:
+                                emoji, label = market_label(mtype, dex)
+                                arrow = "📈" if pct > 0 else "📉"
+                                spike_msg = (
+                                    f"{arrow} *SPIKE {sym}* {emoji}\n\n"
+                                    f"Tipo: {label}\n"
+                                    f"Precedente: ${prev:,.6f}\n"
+                                    f"Attuale:    ${price_val:,.6f}\n"
+                                    f"Variazione: {pct:+.2f}% in {POLL_INTERVAL}s\n"
+                                    f"⏰ {datetime.now().strftime('%H:%M:%S')}"
+                                )
+                                try:
+                                    await application.bot.send_message(
+                                        chat_id=chat_id,
+                                        text=spike_msg,
+                                        parse_mode='Markdown'
+                                    )
+                                    logger.info(f"SPIKE {sym}: {prev:.6f} -> {price_val:.6f} ({pct:+.2f}%) -> chat {chat_id}")
+                                except Exception as e:
+                                    logger.error(f"Errore invio spike a {chat_id}: {e}")
+
+                    monitor.spike_prev_prices[sym] = price_val
+
             await asyncio.sleep(POLL_INTERVAL)
 
         except Exception as e:
@@ -566,6 +696,7 @@ def main():
     app.add_handler(CommandHandler("subscribe",   subscribe))
     app.add_handler(CommandHandler("unsubscribe", unsubscribe))
     app.add_handler(CommandHandler("threshold",   threshold_command))
+    app.add_handler(CommandHandler("pricespike",  pricespike))
     app.add_handler(CommandHandler("list",        list_subscriptions))
     app.add_handler(CommandHandler("symbols",     symbols_command))
     app.add_handler(CommandHandler("stats",       stats))
