@@ -101,7 +101,8 @@ class HyperliquidPriceMonitor:
         self.subscribers:       Dict[int, Set[str]] = {}
         self.last_prices:       Dict[str, float]    = {}  # aggiornato ogni poll
         self.alert_base_prices: Dict[str, float]    = {}  # riferimento alert: impostato al subscribe, aggiornato dopo ogni alert
-        self.user_thresholds:   Dict[int, float]    = {}  # soglia per-utente, fallback a PRICE_CHANGE_THRESHOLD globale
+        self.user_thresholds:   Dict[int, float]    = {}  # soglia subscribe per-utente, fallback a PRICE_CHANGE_THRESHOLD
+        self.spike_thresholds:  Dict[int, float]    = {}  # soglia spike per-utente, fallback a SPIKE_THRESHOLD
         self.spike_subscribers: Set[int]             = set()  # chat_id iscritti a pricespike
         self.spike_prev_prices: Dict[str, float]     = {}     # prezzi poll precedente per pricespike
         self.session: Optional[aiohttp.ClientSession] = None
@@ -207,12 +208,20 @@ class HyperliquidPriceMonitor:
         return result
 
     def get_threshold(self, chat_id: int) -> float:
-        """Restituisce la soglia dell'utente, o quella globale se non impostata."""
+        """Soglia subscribe per-utente, fallback a PRICE_CHANGE_THRESHOLD globale."""
         return self.user_thresholds.get(chat_id, PRICE_CHANGE_THRESHOLD)
 
     def set_threshold(self, chat_id: int, threshold: float):
         self.user_thresholds[chat_id] = threshold
-        logger.info(f"Chat {chat_id} soglia impostata a {threshold}%")
+        logger.info(f"Chat {chat_id} soglia subscribe impostata a {threshold}%")
+
+    def get_spike_threshold(self, chat_id: int) -> float:
+        """Soglia spike per-utente, fallback a SPIKE_THRESHOLD globale."""
+        return self.spike_thresholds.get(chat_id, SPIKE_THRESHOLD)
+
+    def set_spike_threshold(self, chat_id: int, threshold: float):
+        self.spike_thresholds[chat_id] = threshold
+        logger.info(f"Chat {chat_id} soglia spike impostata a {threshold}%")
 
     def add_subscriber(self, chat_id: int, symbol: str):
         self.subscribers.setdefault(chat_id, set()).add(symbol.upper())
@@ -373,7 +382,7 @@ async def pricespike(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if arg == 'status':
         active = chat_id in monitor.spike_subscribers
         stato  = "✅ ATTIVO" if active else "⏸ NON ATTIVO"
-        thresh = monitor.user_thresholds.get(chat_id, SPIKE_THRESHOLD)
+        thresh = monitor.get_spike_threshold(chat_id)
         await update.message.reply_text(
             f"⚡ *PriceSpike* — {stato}\n\n"
             f"Soglia: ±{thresh}% per poll ({POLL_INTERVAL}s)\n"
@@ -389,7 +398,7 @@ async def pricespike(update: Update, context: ContextTypes.DEFAULT_TYPE):
             value = float(arg.replace(',', '.'))
             if value <= 0 or value > 100:
                 raise ValueError
-            monitor.user_thresholds[chat_id] = value
+            monitor.set_spike_threshold(chat_id, value)
             await update.message.reply_text(
                 f"✅ Soglia spike aggiornata a ±{value}% per poll\n"
                 f"Usa /pricespike per attivare/disattivare."
@@ -414,7 +423,7 @@ async def pricespike(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if arg == 'on' or chat_id not in monitor.spike_subscribers:
         monitor.spike_subscribers.add(chat_id)
         logger.info(f"Chat {chat_id} attivato pricespike")
-        thresh = monitor.user_thresholds.get(chat_id, SPIKE_THRESHOLD)
+        thresh = monitor.get_spike_threshold(chat_id)
         await update.message.reply_text(
             f"⚡ *PriceSpike attivato!*\n\n"
             f"Ti avviso se un prezzo varia di ±{thresh}% "
@@ -425,7 +434,7 @@ async def pricespike(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         # già attivo e nessun argomento: informa l'utente
-        thresh = monitor.user_thresholds.get(chat_id, SPIKE_THRESHOLD)
+        thresh = monitor.get_spike_threshold(chat_id)
         await update.message.reply_text(
             f"⚡ *PriceSpike già attivo* (soglia ±{thresh}%)\n"
             f"Usa /pricespike off per disattivare.",
@@ -552,7 +561,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⏱️ Intervallo polling: {POLL_INTERVAL}s\n"
         f"📊 Soglia notifiche: ±{monitor.get_threshold(update.effective_chat.id)}% (globale: ±{PRICE_CHANGE_THRESHOLD}%)\n"
         f"🔗 DEX supportati: {', '.join(d.upper() for d in SUPPORTED_DEXS)}\n"
-        f"⚡ PriceSpike: {'attivo' if update.effective_chat.id in monitor.spike_subscribers else 'non attivo'} (soglia ±{monitor.user_thresholds.get(update.effective_chat.id, SPIKE_THRESHOLD)}% per poll)\n"
+        f"⚡ PriceSpike: {'attivo' if update.effective_chat.id in monitor.spike_subscribers else 'non attivo'} (soglia ±{monitor.get_spike_threshold(update.effective_chat.id)}% per poll)\n"
         f"📁 Log: {LOG_FILE}\n"
         f"⚙️ Config: {env_file}\n"
     )
@@ -576,6 +585,11 @@ async def price_polling_task(application: Application):
                 all_prices = await monitor.fetch_all_prices()
                 logger.debug(f"Batch fetch: {len(all_prices)} prezzi ricevuti, monitoro {len(monitored)} simboli")
 
+                # Accumula alert subscribe per chat_id: {chat_id: [righe]}
+                subscribe_alerts: Dict[int, list] = {}
+                # Traccia quali simboli hanno scatenato alert (per aggiornare base price)
+                triggered_syms: Set[str] = set()
+
                 for sym in monitored:
                     if sym not in all_prices:
                         logger.debug(f"Simbolo {sym} non trovato nel batch")
@@ -583,42 +597,39 @@ async def price_polling_task(application: Application):
 
                     price_val, mtype, dex = all_prices[sym]
                     emoji, label = market_label(mtype, dex)
-                    base = monitor.alert_base_prices.get(sym)  # prezzo di riferimento alert
+                    base = monitor.alert_base_prices.get(sym)
 
                     if base is not None:
                         pct = (price_val - base) / base * 100
-                        alert_sent = False
                         for chat_id, syms in monitor.subscribers.items():
                             if sym not in syms:
                                 continue
                             threshold = monitor.get_threshold(chat_id)
                             if abs(pct) >= threshold:
-                                if not alert_sent:
-                                    logger.info(f"ALERT {sym} ({label}): {base:.6f} -> {price_val:.6f} ({pct:+.2f}%)")
+                                logger.info(f"ALERT {sym} ({label}): {base:.6f} -> {price_val:.6f} ({pct:+.2f}%)")
                                 arrow = "📈" if price_val > base else "📉"
-                                alert = (
-                                    f"{arrow} *{sym}* Alert! {emoji}\n\n"
-                                    f"Tipo: {label}\n"
-                                    f"Riferimento: ${base:,.6f}\n"
-                                    f"Attuale: ${price_val:,.6f}\n"
-                                    f"Cambio: {pct:+.2f}%\n"
-                                    f"Soglia: ±{threshold}%\n"
-                                    f"⏰ {datetime.now().strftime('%H:%M:%S')}"
+                                subscribe_alerts.setdefault(chat_id, []).append(
+                                    f"{arrow} *{sym}* {emoji} {label}\n"
+                                    f"  Rif: ${base:,.6f}  →  ${price_val:,.6f}  ({pct:+.2f}%)"
                                 )
-                                try:
-                                    await application.bot.send_message(
-                                        chat_id=chat_id,
-                                        text=alert,
-                                        parse_mode='Markdown'
-                                    )
-                                    alert_sent = True
-                                except Exception as e:
-                                    logger.error(f"Errore invio a {chat_id}: {e}")
-                        # Aggiorna il riferimento SOLO se almeno un alert è stato inviato
-                        if alert_sent:
-                            monitor.alert_base_prices[sym] = price_val
+                                triggered_syms.add(sym)
 
-                    monitor.last_prices[sym] = price_val  # aggiornato sempre
+                    monitor.last_prices[sym] = price_val
+
+                # Invia un unico messaggio per chat con tutti gli alert subscribe
+                now = datetime.now().strftime('%H:%M:%S')
+                for chat_id, lines in subscribe_alerts.items():
+                    threshold = monitor.get_threshold(chat_id)
+                    msg = f"🔔 *Alert sottoscrizioni* — {now} (soglia ±{threshold}%)\n\n" + "\n".join(lines)
+                    try:
+                        await application.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
+                    except Exception as e:
+                        logger.error(f"Errore invio subscribe alert a {chat_id}: {e}")
+
+                # Aggiorna base price solo per i simboli che hanno triggerato
+                for sym in triggered_syms:
+                    if sym in all_prices:
+                        monitor.alert_base_prices[sym] = all_prices[sym][0]
 
             # --- PRICESPIKE: confronto poll-to-poll su lista fissa ---
             if monitor.spike_subscribers:
@@ -631,6 +642,9 @@ async def price_polling_task(application: Application):
                 # Usa all_prices se già fetchato, altrimenti fetcha ora
                 prices_batch = all_prices if all_prices else await monitor.fetch_all_prices()
 
+                # Accumula spike per chat_id: {chat_id: [righe]}
+                spike_alerts: Dict[int, list] = {}
+
                 for sym in spike_symbols:
                     if sym not in prices_batch:
                         continue
@@ -640,29 +654,27 @@ async def price_polling_task(application: Application):
                     if prev is not None and prev > 0:
                         pct = (price_val - prev) / prev * 100
                         for chat_id in monitor.spike_subscribers:
-                            thresh = monitor.user_thresholds.get(chat_id, SPIKE_THRESHOLD)
+                            thresh = monitor.get_spike_threshold(chat_id)
                             if abs(pct) >= thresh:
                                 emoji, label = market_label(mtype, dex)
                                 arrow = "📈" if pct > 0 else "📉"
-                                spike_msg = (
-                                    f"{arrow} *SPIKE {sym}* {emoji}\n\n"
-                                    f"Tipo: {label}\n"
-                                    f"Precedente: ${prev:,.6f}\n"
-                                    f"Attuale:    ${price_val:,.6f}\n"
-                                    f"Variazione: {pct:+.2f}% in {POLL_INTERVAL}s\n"
-                                    f"⏰ {datetime.now().strftime('%H:%M:%S')}"
+                                logger.info(f"SPIKE {sym}: {prev:.6f} -> {price_val:.6f} ({pct:+.2f}%)")
+                                spike_alerts.setdefault(chat_id, []).append(
+                                    f"{arrow} *{sym}* {emoji} {label}\n"
+                                    f"  ${prev:,.6f}  →  ${price_val:,.6f}  ({pct:+.2f}%)"
                                 )
-                                try:
-                                    await application.bot.send_message(
-                                        chat_id=chat_id,
-                                        text=spike_msg,
-                                        parse_mode='Markdown'
-                                    )
-                                    logger.info(f"SPIKE {sym}: {prev:.6f} -> {price_val:.6f} ({pct:+.2f}%) -> chat {chat_id}")
-                                except Exception as e:
-                                    logger.error(f"Errore invio spike a {chat_id}: {e}")
 
                     monitor.spike_prev_prices[sym] = price_val
+
+                # Invia un unico messaggio per chat con tutti gli spike
+                now = datetime.now().strftime('%H:%M:%S')
+                for chat_id, lines in spike_alerts.items():
+                    thresh = monitor.get_spike_threshold(chat_id)
+                    msg = f"⚡ *PriceSpike* — {now} (soglia ±{thresh}% / {POLL_INTERVAL}s)\n\n" + "\n".join(lines)
+                    try:
+                        await application.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
+                    except Exception as e:
+                        logger.error(f"Errore invio spike a {chat_id}: {e}")
 
             await asyncio.sleep(POLL_INTERVAL)
 
