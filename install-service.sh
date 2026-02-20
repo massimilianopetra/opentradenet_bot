@@ -20,20 +20,12 @@ echo "Directory: $BOT_DIR"
 echo "Python:    $PYTHON_BIN"
 echo ""
 
-# 1. Crea virtualenv se non esiste
-if [ ! -d "$BOT_DIR/venv" ]; then
-    echo "[1/5] Creo virtualenv..."
-    python3 -m venv "$BOT_DIR/venv"
-else
-    echo "[1/5] Virtualenv già esistente, skip."
-fi
 
-
-# 2. Crea la cartella log
+# 1. Crea la cartella log
 echo "[3/5] Creo cartella log..."
 mkdir -p "$BOT_DIR/logs"
 
-# 3. Genera il file .service con i valori reali
+# 2. Genera il file .service con i valori reali
 echo "[4/5] Genero file systemd..."
 SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME.service"
 
@@ -59,7 +51,7 @@ UNIT
 
 echo "    Scritto: $SERVICE_FILE"
 
-# 4. Abilita e avvia il servizio
+# 3. Abilita e avvia il servizio
 echo "[5/5] Abilito e avvio il servizio..."
 sudo systemctl daemon-reload
 sudo systemctl enable "$SERVICE_NAME"
