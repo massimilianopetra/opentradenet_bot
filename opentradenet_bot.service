@@ -1,5 +1,5 @@
 [Unit]
-Description=Hyperliquid Price Monitor Bot
+Description=OpenTradeNet Hyperliquid Price Monitor Bot
 After=network-online.target
 Wants=network-online.target
 
@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 User=solana
 WorkingDirectory=/home/solana/opentradenet_bot
-ExecStart=/usr/bin/python3 hyperliquid_bot.py /home/solana/opentradenet_bot/opentradenet.env
+ExecStart=/usr/bin/python3 /home/solana/opentradenet_bot/hyperliquid_bot.py opentradenet.env
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
