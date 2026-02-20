@@ -20,7 +20,7 @@ if len(sys.argv) > 1:
 else:
     env_file = 'opentradenet.env'
 
-env_path = Path('.') / env_file
+env_path = Path(env_file) if Path(env_file).is_absolute() else Path('.') / env_file
 
 if not env_path.exists():
     print(f"❌ Errore: File {env_file} non trovato!")
