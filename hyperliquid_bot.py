@@ -1,10 +1,11 @@
 import asyncio
+import csv
 import logging
 import logging.handlers
 import os
 import sys
 from typing import Dict, Set, Optional, Tuple
-from datetime import datetime
+from datetime import datetime, date
 from pathlib import Path
 from dotenv import load_dotenv
 import aiohttp
@@ -84,6 +85,11 @@ SUPPORTED_DEXS = [d.strip() for d in os.getenv('SUPPORTED_DEXS', 'xyz').split(',
 SPIKE_EXTRA_SYMBOLS    = [s.strip().upper() for s in os.getenv('SPIKE_EXTRA_SYMBOLS', 'BTC,SOL,ETH,XRP,SUI,HYPER').split(',') if s.strip()]
 SPIKE_THRESHOLD        = float(os.getenv('SPIKE_THRESHOLD', '1.0'))   # soglia % poll-to-poll per pricespike
 
+# Directory storico prezzi giornalieri (un CSV per simbolo)
+# Record_TIME: ora dopo cui scrivere la quotazione del giorno (default 09:00)
+PRICES_DIR    = Path(os.getenv('PRICES_DIR', 'data/prices'))
+PRICES_TIME   = int(os.getenv('PRICES_TIME', '9'))  # ora intera (0-23)
+
 if not TELEGRAM_TOKEN:
     logger.error("❌ TELEGRAM_TOKEN non trovato nel file .env")
     sys.exit(1)
@@ -105,6 +111,7 @@ class HyperliquidPriceMonitor:
         self.spike_thresholds:  Dict[int, float]    = {}  # soglia spike per-utente, fallback a SPIKE_THRESHOLD
         self.spike_subscribers: Set[int]             = set()  # chat_id iscritti a pricespike
         self.spike_prev_prices: Dict[str, float]     = {}     # prezzi poll precedente per pricespike
+        self.last_snapshot_date: Optional[date]       = None   # data dell'ultimo snapshot giornaliero scritto
         self.session: Optional[aiohttp.ClientSession] = None
 
     async def init_session(self):
@@ -569,6 +576,49 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------------------------------------------------------------
+# Snapshot giornaliero prezzi
+# ---------------------------------------------------------------------------
+
+def save_daily_snapshot(prices: Dict[str, Tuple[float, str, Optional[str]]]) -> int:
+    """
+    Scrive la quotazione odierna di ogni simbolo nel proprio CSV.
+    Formato: data/prices/BTC.csv  con colonne date,price,type,dex
+    Salta il simbolo se la data di oggi è già presente nel file.
+    Ritorna il numero di simboli scritti.
+    """
+    PRICES_DIR.mkdir(parents=True, exist_ok=True)
+    today     = date.today().isoformat()   # es: 2026-01-15
+    written   = 0
+
+    for sym, (price, mtype, dex) in prices.items():
+        csv_path = PRICES_DIR / f"{sym}.csv"
+
+        # Controlla se oggi è già stato scritto
+        if csv_path.exists():
+            try:
+                with open(csv_path, 'r', encoding='utf-8') as f:
+                    last_line = f.readlines()[-1].strip()
+                if last_line.startswith(today):
+                    continue   # già registrato oggi
+            except Exception:
+                pass  # file vuoto o corrotto: riscrivi comunque
+
+        # Scrivi (o crea) il CSV
+        is_new = not csv_path.exists()
+        try:
+            with open(csv_path, 'a', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                if is_new:
+                    writer.writerow(['date', 'price', 'type', 'dex'])
+                writer.writerow([today, price, mtype, dex or ''])
+            written += 1
+        except Exception as e:
+            logger.error(f"Errore scrittura snapshot {sym}: {e}")
+
+    return written
+
+
+# ---------------------------------------------------------------------------
 # Polling task — BATCH: 2 chiamate HTTP per tutti i simboli monitorati
 # ---------------------------------------------------------------------------
 
@@ -675,6 +725,21 @@ async def price_polling_task(application: Application):
                         await application.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
                     except Exception as e:
                         logger.error(f"Errore invio spike a {chat_id}: {e}")
+
+            # --- SNAPSHOT GIORNALIERO: scrivi prezzi dopo le PRICES_TIME ---
+            now_dt = datetime.now()
+            today  = now_dt.date()
+            if (now_dt.hour >= PRICES_TIME
+                    and monitor.last_snapshot_date != today
+                    and all_prices):
+                prices_to_snap = all_prices.copy()
+                # Includi anche eventuali simboli spike non già in all_prices
+                if monitor.spike_subscribers:
+                    prices_batch = all_prices if all_prices else await monitor.fetch_all_prices()
+                    prices_to_snap.update(prices_batch)
+                written = save_daily_snapshot(prices_to_snap)
+                monitor.last_snapshot_date = today
+                logger.info(f"Snapshot giornaliero: {written} simboli scritti in {PRICES_DIR}")
 
             await asyncio.sleep(POLL_INTERVAL)
 
