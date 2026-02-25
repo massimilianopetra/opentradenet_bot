@@ -732,7 +732,11 @@ async def price_polling_task(application: Application):
             if (now_dt.hour >= PRICES_TIME
                     and monitor.last_snapshot_date != today):
                 # Fetch dedicato: all_prices potrebbe essere vuoto se non ci sono subscriber
-                prices_to_snap = all_prices.copy() if all_prices else await monitor.fetch_all_prices()
+                prices_batch = all_prices.copy() if all_prices else await monitor.fetch_all_prices()
+                # Snapshot solo dei simboli monitorati da pricespike (xyz + extra)
+                xyz_syms = {sym for sym, (_, _, dex) in prices_batch.items() if dex and dex.upper() == 'XYZ'}
+                spike_symbols = xyz_syms | set(SPIKE_EXTRA_SYMBOLS)
+                prices_to_snap = {sym: v for sym, v in prices_batch.items() if sym in spike_symbols}
                 if prices_to_snap:
                     written = save_daily_snapshot(prices_to_snap)
                     monitor.last_snapshot_date = today
