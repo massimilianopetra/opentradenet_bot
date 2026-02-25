@@ -106,7 +106,8 @@ class HyperliquidPriceMonitor:
     def __init__(self):
         self.subscribers:       Dict[int, Set[str]] = {}
         self.last_prices:       Dict[str, float]    = {}  # aggiornato ogni poll
-        self.alert_base_prices: Dict[str, float]    = {}  # riferimento alert: impostato al subscribe, aggiornato dopo ogni alert
+        self.alert_base_prices:     Dict[str, float]    = {}  # riferimento alert: impostato al subscribe, aggiornato dopo ogni alert
+        self.subscribe_base_prices: Dict[str, float]    = {}  # prezzo al momento del primo subscribe, mai modificato
         self.user_thresholds:   Dict[int, float]    = {}  # soglia subscribe per-utente, fallback a PRICE_CHANGE_THRESHOLD
         self.spike_thresholds:  Dict[int, float]    = {}  # soglia spike per-utente, fallback a SPIKE_THRESHOLD
         self.spike_subscribers: Set[int]             = set()  # chat_id iscritti a pricespike
@@ -310,12 +311,13 @@ async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     price_val, mtype, dex = result
     emoji, label = market_label(mtype, dex)
 
-    variation_msg = ""
-    old = monitor.last_prices.get(sym)
-    if old:
-        pct = (price_val - old) / old * 100
-        arrow = "📈" if price_val > old else "📉" if price_val < old else "➡️"
-        variation_msg = f"\n{arrow} Sessione: {pct:+.2f}%"
+    # Delta rispetto al prezzo del primo subscribe (se sottoscritto)
+    sub_msg = ""
+    base = monitor.subscribe_base_prices.get(sym)
+    if base:
+        pct_s = (price_val - base) / base * 100
+        arrow_s = "📈" if pct_s > 0 else "📉" if pct_s < 0 else "➡️"
+        sub_msg = f"\n{arrow_s} Da subscribe ({base:,.6f}): {pct_s:+.2f}%"
 
     # Delta rispetto al prezzo del giorno prima (dal CSV storico)
     yesterday_msg = ""
@@ -328,7 +330,7 @@ async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"{emoji} *{sym}* ({label})\n"
         f"Prezzo: ${price_val:,.6f}"
-        f"{variation_msg}"
+        f"{sub_msg}"
         f"{yesterday_msg}\n"
         f"⏰ {datetime.now().strftime('%H:%M:%S')}",
         parse_mode='Markdown'
@@ -359,6 +361,8 @@ async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Salva il prezzo base al momento del subscribe come riferimento per gli alert
     monitor.last_prices[sym]       = price_val
     monitor.alert_base_prices[sym] = price_val
+    # Salva il prezzo originale del subscribe (non viene mai aggiornato)
+    monitor.subscribe_base_prices.setdefault(sym, price_val)
 
     await update.message.reply_text(
         f"✅ Monitoro *{sym}* per te!\n"
