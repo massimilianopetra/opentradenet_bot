@@ -82,7 +82,7 @@ SUPPORTED_DEXS = [d.strip() for d in os.getenv('SUPPORTED_DEXS', 'xyz').split(',
 # Simboli fissi per pricespike: lista separata da virgola nel .env
 # Es: SPIKE_EXTRA_SYMBOLS=BTC,SOL,ETH,XRP,SUI,HYPER
 # I simboli xyz vengono aggiunti automaticamente a runtime dal batch
-SPIKE_EXTRA_SYMBOLS    = [s.strip().upper() for s in os.getenv('SPIKE_EXTRA_SYMBOLS', 'BTC,SOL,ETH,XRP,SUI,HYPER').split(',') if s.strip()]
+SPIKE_EXTRA_SYMBOLS    = [s.strip().upper() for s in os.getenv('SPIKE_EXTRA_SYMBOLS', 'BTC,SOL,ETH,XRP,SUI,HYPE').split(',') if s.strip()]
 SPIKE_THRESHOLD        = float(os.getenv('SPIKE_THRESHOLD', '1.0'))   # soglia % poll-to-poll per pricespike
 
 # Directory storico prezzi giornalieri (un CSV per simbolo)
@@ -315,12 +315,21 @@ async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if old:
         pct = (price_val - old) / old * 100
         arrow = "📈" if price_val > old else "📉" if price_val < old else "➡️"
-        variation_msg = f"\n{arrow} Variazione: {pct:+.2f}%"
+        variation_msg = f"\n{arrow} Sessione: {pct:+.2f}%"
+
+    # Delta rispetto al prezzo del giorno prima (dal CSV storico)
+    yesterday_msg = ""
+    yesterday = get_yesterday_price(sym)
+    if yesterday:
+        pct_d = (price_val - yesterday) / yesterday * 100
+        arrow_d = "📈" if pct_d > 0 else "📉" if pct_d < 0 else "➡️"
+        yesterday_msg = f"\n{arrow_d} Ieri ({yesterday:,.6f}): {pct_d:+.2f}%"
 
     await update.message.reply_text(
         f"{emoji} *{sym}* ({label})\n"
         f"Prezzo: ${price_val:,.6f}"
-        f"{variation_msg}\n"
+        f"{variation_msg}"
+        f"{yesterday_msg}\n"
         f"⏰ {datetime.now().strftime('%H:%M:%S')}",
         parse_mode='Markdown'
     )
@@ -578,6 +587,23 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------------------------------------------------------------------
 # Snapshot giornaliero prezzi
 # ---------------------------------------------------------------------------
+
+def get_yesterday_price(sym: str) -> Optional[float]:
+    """Legge il prezzo del giorno precedente dal CSV dello storico."""
+    csv_path = PRICES_DIR / f"{sym}.csv"
+    if not csv_path.exists():
+        return None
+    try:
+        with open(csv_path, 'r', encoding='utf-8') as f:
+            rows = [r for r in csv.reader(f) if r and r[0] != 'date']
+        # Cerca il giorno precedente: l'ultima riga con data < oggi
+        today = date.today().isoformat()
+        past = [r for r in rows if r[0] < today]
+        if past:
+            return float(past[-1][1])
+    except Exception:
+        pass
+    return None
 
 def save_daily_snapshot(prices: Dict[str, Tuple[float, str, Optional[str]]]) -> int:
     """
