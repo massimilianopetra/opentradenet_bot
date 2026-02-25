@@ -730,16 +730,15 @@ async def price_polling_task(application: Application):
             now_dt = datetime.now()
             today  = now_dt.date()
             if (now_dt.hour >= PRICES_TIME
-                    and monitor.last_snapshot_date != today
-                    and all_prices):
-                prices_to_snap = all_prices.copy()
-                # Includi anche eventuali simboli spike non già in all_prices
-                if monitor.spike_subscribers:
-                    prices_batch = all_prices if all_prices else await monitor.fetch_all_prices()
-                    prices_to_snap.update(prices_batch)
-                written = save_daily_snapshot(prices_to_snap)
-                monitor.last_snapshot_date = today
-                logger.info(f"Snapshot giornaliero: {written} simboli scritti in {PRICES_DIR}")
+                    and monitor.last_snapshot_date != today):
+                # Fetch dedicato: all_prices potrebbe essere vuoto se non ci sono subscriber
+                prices_to_snap = all_prices.copy() if all_prices else await monitor.fetch_all_prices()
+                if prices_to_snap:
+                    written = save_daily_snapshot(prices_to_snap)
+                    monitor.last_snapshot_date = today
+                    logger.info(f"Snapshot giornaliero: {written} simboli scritti in {PRICES_DIR}")
+                else:
+                    logger.warning("Snapshot giornaliero: nessun prezzo disponibile, riprovo al prossimo ciclo")
 
             await asyncio.sleep(POLL_INTERVAL)
 
