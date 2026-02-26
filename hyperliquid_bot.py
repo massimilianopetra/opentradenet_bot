@@ -84,6 +84,9 @@ SUPPORTED_DEXS = [d.strip() for d in os.getenv('SUPPORTED_DEXS', 'xyz').split(',
 # I simboli xyz vengono aggiunti automaticamente a runtime dal batch
 SPIKE_EXTRA_SYMBOLS    = [s.strip().upper() for s in os.getenv('SPIKE_EXTRA_SYMBOLS', 'BTC,SOL,ETH,XRP,SUI,HYPE').split(',') if s.strip()]
 SPIKE_THRESHOLD        = float(os.getenv('SPIKE_THRESHOLD', '1.0'))   # soglia % poll-to-poll per pricespike
+# Simboli xyz da escludere dagli alert spike (bassi volumi) — solo gli avvisi, lo storico viene comunque salvato
+# Es: SPIKE_EXCLUDE_SYMBOLS=SYMB1,SYMB2
+SPIKE_EXCLUDE_SYMBOLS  = {s.strip().upper() for s in os.getenv('SPIKE_EXCLUDE_SYMBOLS', '').split(',') if s.strip()}
 
 # Directory storico prezzi giornalieri (un CSV per simbolo)
 # Record_TIME: ora dopo cui scrivere la quotazione del giorno (default 09:00)
@@ -717,7 +720,7 @@ async def price_polling_task(application: Application):
                 xyz_syms = set()
                 if all_prices:
                     xyz_syms = {sym for sym, (_, _, dex) in all_prices.items() if dex and dex.upper() == 'XYZ'}
-                spike_symbols = xyz_syms | set(SPIKE_EXTRA_SYMBOLS)
+                spike_symbols = (xyz_syms | set(SPIKE_EXTRA_SYMBOLS)) - SPIKE_EXCLUDE_SYMBOLS
 
                 # Usa all_prices se già fetchato, altrimenti fetcha ora
                 prices_batch = all_prices if all_prices else await monitor.fetch_all_prices()
@@ -765,7 +768,7 @@ async def price_polling_task(application: Application):
                 prices_batch = all_prices.copy() if all_prices else await monitor.fetch_all_prices()
                 # Snapshot solo dei simboli monitorati da pricespike (xyz + extra)
                 xyz_syms = {sym for sym, (_, _, dex) in prices_batch.items() if dex and dex.upper() == 'XYZ'}
-                spike_symbols = xyz_syms | set(SPIKE_EXTRA_SYMBOLS)
+                spike_symbols = (xyz_syms | set(SPIKE_EXTRA_SYMBOLS)) - SPIKE_EXCLUDE_SYMBOLS
                 prices_to_snap = {sym: v for sym, v in prices_batch.items() if sym in spike_symbols}
                 if prices_to_snap:
                     written = save_daily_snapshot(prices_to_snap)
