@@ -997,49 +997,16 @@ async def position_tracking_task(application: Application):
                 # Simboli attualmente aperti dall'API
                 for p in pos_list:
                     coin = p['coin']
-                    # Recupera prezzo corrente dal monitor (già in cache dal polling 10s)
-                    price_info   = monitor.last_prices.get(coin)
-                    current_price = price_info if price_info else p['entry_px']
 
                     if coin in current_tracks:
-                        # Posizione già tracciata — aggiorna dati e controlla alert
+                        # Posizione già tracciata — aggiorna solo dati da API (size/margin/liq/pnl)
+                        # Il check soglia è gestito dal polling 10s tramite last_prices
                         track = current_tracks[coin].copy()
-                        track['size']      = p['size']
-                        track['margin']    = p['margin']
+                        track['size']       = p['size']
+                        track['margin']     = p['margin']
                         track['unrealized'] = p['unrealized']
-                        track['liq_px']    = p['liq_px']
-
-                        # Alert se il prezzo varia dalla base oltre la soglia
-                        base = track['alert_base']
-                        if base and base > 0 and current_price:
-                            pct = (current_price - base) / base * 100
-                            if abs(pct) >= threshold:
-                                arrow   = "📈" if pct > 0 else "📉"
-                                is_long = track['is_long']
-                                # Positivo per long se sale, per short se scende
-                                favor   = (pct > 0 and is_long) or (pct < 0 and not is_long)
-                                favor_s = "✅ a favore" if favor else "⚠️ contro"
-                                pnl     = p['unrealized']
-                                pnl_s   = "+" if pnl >= 0 else ""
-                                liq_dist = abs((p['liq_px'] - current_price) / current_price * 100) if p['liq_px'] else 0
-                                alert_msg = (
-                                    f"{arrow} *{coin}* {'LONG' if is_long else 'SHORT'} _{track['dex']}_ {track['leverage']}x\n\n"
-                                    f"Variazione: {pct:+.2f}% {favor_s}\n"
-                                    f"Entry: ${base:,.5g}  →  ${current_price:,.5g}\n"
-                                    f"PnL: {pnl_s}${pnl:.2f}\n"
-                                    f"Distanza liq: {liq_dist:.1f}%\n"
-                                    f"⏰ {datetime.now().strftime('%H:%M:%S')}"
-                                )
-                                try:
-                                    await application.bot.send_message(
-                                        chat_id=chat_id, text=alert_msg, parse_mode='Markdown'
-                                    )
-                                    logger.info(f"TRACK ALERT {coin}: {pct:+.2f}% -> chat {chat_id}")
-                                    track['alert_base'] = current_price  # aggiorna base dopo alert
-                                except Exception as e:
-                                    logger.error(f"Errore invio track alert {chat_id}: {e}")
-
-                        new_tracks[coin] = track
+                        track['liq_px']     = p['liq_px']
+                        new_tracks[coin]    = track
 
                     else:
                         # Nuova posizione rilevata — aggiungi al tracking
@@ -1161,6 +1128,57 @@ async def price_polling_task(application: Application):
                 for sym in triggered_syms:
                     if sym in all_prices:
                         monitor.alert_base_prices[sym] = all_prices[sym][0]
+
+                # --- POSITION TRACKING ALERTS: check soglia ogni 10s su last_prices ---
+                track_alerts: Dict[int, list] = {}
+                track_triggered: list = []  # [(chat_id, coin, new_base), ...]
+
+                for chat_id, tracks in monitor.position_tracks.items():
+                    threshold = monitor.get_threshold(chat_id)
+                    for coin, track in tracks.items():
+                        price_info = all_prices.get(coin)
+                        if not price_info:
+                            continue
+                        current_price = price_info[0]
+                        base = track.get('alert_base', track['entry_px'])
+                        if not base or base <= 0:
+                            continue
+                        pct = (current_price - base) / base * 100
+                        if abs(pct) >= threshold:
+                            is_long  = track['is_long']
+                            favor    = (pct > 0 and is_long) or (pct < 0 and not is_long)
+                            favor_s  = "✅ a favore" if favor else "⚠️ contro"
+                            arrow    = "📈" if pct > 0 else "📉"
+                            pnl      = track['unrealized']
+                            pnl_s    = "+" if pnl >= 0 else ""
+                            liq      = track['liq_px']
+                            liq_dist = abs((liq - current_price) / current_price * 100) if liq else 0
+                            logger.info(f"TRACK ALERT {coin}: {pct:+.2f}% -> chat {chat_id}")
+                            track_alerts.setdefault(chat_id, []).append(
+                                f"{arrow} *{coin}* {'LONG' if is_long else 'SHORT'} "
+                                f"_{track['dex']}_ {track['leverage']}x  {favor_s}\n"
+                                f"  Entry: ${track['entry_px']:,.5g}  →  ${current_price:,.5g}  ({pct:+.2f}%)\n"
+                                f"  PnL: {pnl_s}${pnl:.2f}   Liq dist: {liq_dist:.1f}%"
+                            )
+                            track_triggered.append((chat_id, coin, current_price))
+
+                # Invia alert position tracking (un messaggio per chat)
+                now = datetime.now().strftime('%H:%M:%S')
+                for chat_id, lines in track_alerts.items():
+                    threshold = monitor.get_threshold(chat_id)
+                    msg = (f"🎯 *Position Alert* — {now} (soglia ±{threshold}%)\n\n"
+                           + "\n\n".join(lines))
+                    try:
+                        await application.bot.send_message(
+                            chat_id=chat_id, text=msg, parse_mode='Markdown'
+                        )
+                    except Exception as e:
+                        logger.error(f"Errore invio track alert {chat_id}: {e}")
+
+                # Aggiorna alert_base per i coin che hanno triggerato
+                for chat_id, coin, new_base in track_triggered:
+                    if coin in monitor.position_tracks.get(chat_id, {}):
+                        monitor.position_tracks[chat_id][coin]['alert_base'] = new_base
 
             # --- PRICESPIKE: confronto poll-to-poll su lista fissa ---
             if monitor.spike_subscribers:
