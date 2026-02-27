@@ -579,10 +579,17 @@ async def list_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE)
             arrow_dir = "📈" if is_long else "📉"
             dir_s     = "LONG" if is_long else "SHORT"
 
-            if current_price and base:
-                pct_from_base = (current_price - base) / base * 100
-                arrow_p = "📈" if pct_from_base > 0 else "📉" if pct_from_base < 0 else "➡️"
-                pct_str = f"  {arrow_p} Da entry: {pct_from_base:+.2f}%\n"
+            # Formatter prezzi: decimali adattivi (2 per grandi, 4 per piccoli)
+            def fmt(x):
+                if x == 0: return "0"
+                if x >= 100:  return f"{x:,.2f}"
+                if x >= 1:    return f"{x:,.3f}"
+                return f"{x:,.5f}"
+
+            if current_price and entry:
+                pct_from_entry = (current_price - entry) / entry * 100
+                arrow_p = "📈" if pct_from_entry > 0 else "📉" if pct_from_entry < 0 else "➡️"
+                pct_str = f"  {arrow_p} Da entry: {pct_from_entry:+.2f}%  (rif alert: {fmt(base)})\n"
             else:
                 pct_str = ""
 
@@ -590,7 +597,7 @@ async def list_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
             msg += (
                 f"{arrow_dir} *{coin}* {dir_s} _{track['dex']}_ {track['leverage']}x\n"
-                f"  Entry: {fmt(entry)}  Size: {abs(track['size'])}\n"
+                f"  Entry: {fmt(entry)}  Ora: {fmt(current_price) if current_price else '—'}  Size: {abs(track['size'])}\n"
                 f"  PnL: {pnl_s}${pnl:.2f} ({pnl_s}{pnl_pct:.1f}%)\n"
                 f"{pct_str}"
                 f"  Liq: {fmt(liq)} (dist: {liq_dist:.1f}%)\n\n"
@@ -1030,8 +1037,8 @@ async def position_tracking_task(application: Application):
                                     f"🎯 *Nuova posizione rilevata*\n\n"
                                     f"{'📈 LONG' if p['is_long'] else '📉 SHORT'} *{coin}* "
                                     f"_{p.get('dex','PERP')}_ {p['leverage']}x\n"
-                                    f"Entry: ${p['entry_px']:,.5g}  Size: {abs(p['size'])}\n"
-                                    f"Margin: ${p['margin']:.2f}  Liq: ${p['liq_px']:,.5g}\n"
+                                    f"Entry: ${p['entry_px']:,.2f}  Size: {abs(p['size'])}\n"
+                                    f"Margin: ${p['margin']:.2f}  Liq: ${p['liq_px']:,.2f}\n"
                                     f"Soglia alert: ±{threshold}%"
                                 ),
                                 parse_mode='Markdown'
@@ -1050,7 +1057,7 @@ async def position_tracking_task(application: Application):
                             text=(
                                 f"🏁 *Posizione chiusa*: *{coin}*\n"
                                 f"{'LONG' if track['is_long'] else 'SHORT'} _{track['dex']}_ {track['leverage']}x\n"
-                                f"Entry: ${track['entry_px']:,.5g}\n"
+                                f"Entry: ${track['entry_px']:,.2f}\n"
                                 f"⏰ {datetime.now().strftime('%H:%M:%S')}"
                             ),
                             parse_mode='Markdown'
@@ -1157,8 +1164,8 @@ async def price_polling_task(application: Application):
                             track_alerts.setdefault(chat_id, []).append(
                                 f"{arrow} *{coin}* {'LONG' if is_long else 'SHORT'} "
                                 f"_{track['dex']}_ {track['leverage']}x  {favor_s}\n"
-                                f"  Rif: ${base:,.5g}  →  ${current_price:,.5g}  ({pct:+.2f}%)\n"
-                                f"  Entry: ${track['entry_px']:,.5g}   PnL: {pnl_s}${pnl:.2f}\n"
+                                f"  Rif: ${base:,.2f}  →  ${current_price:,.2f}  ({pct:+.2f}%)\n"
+                                f"  Entry: ${track['entry_px']:,.2f}   PnL: {pnl_s}${pnl:.2f}\n"
                                 f"  Liq dist: {liq_dist:.1f}%"
                             )
                             track_triggered.append((chat_id, coin, current_price))
