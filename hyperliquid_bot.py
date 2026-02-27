@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 import aiohttp
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
+from hl_wallet import WalletStore, HyperliquidClient, generate_encryption_key
 
 # ---------------------------------------------------------------------------
 # Configurazione ambiente
@@ -93,12 +94,36 @@ SPIKE_EXCLUDE_SYMBOLS  = {s.strip().upper() for s in os.getenv('SPIKE_EXCLUDE_SY
 PRICES_DIR    = Path(os.getenv('PRICES_DIR', 'data/prices'))
 PRICES_TIME   = int(os.getenv('PRICES_TIME', '9'))  # ora intera (0-23)
 
+# Whitelist chat_id autorizzati a usare comandi wallet/trading (separati da virgola)
+# Es: WALLET_ALLOWED_CHATS=123456789,987654321
+# Se vuoto: tutti gli utenti possono registrare le loro credenziali
+WALLET_ALLOWED_CHATS = {int(x.strip()) for x in os.getenv('WALLET_ALLOWED_CHATS', '').split(',') if x.strip()}
+
+# Chiave di cifratura per le private key su disco (Fernet AES-128)
+# Se non presente nel .env viene generata automaticamente al primo avvio e stampata in log
+WALLET_ENCRYPTION_KEY = os.getenv('WALLET_ENCRYPTION_KEY', '')
+
 if not TELEGRAM_TOKEN:
     logger.error("❌ TELEGRAM_TOKEN non trovato nel file .env")
     sys.exit(1)
 
 logger.info(f"Config: POLL={POLL_INTERVAL}s THRESHOLD={PRICE_CHANGE_THRESHOLD}% DEX={SUPPORTED_DEXS}")
 logger.info(f"Log file: {LOG_FILE.resolve()}")
+
+# Inizializza WalletStore — genera chiave di cifratura se non presente nel .env
+if not WALLET_ENCRYPTION_KEY:
+    _new_key = generate_encryption_key()
+    logger.warning("=" * 60)
+    logger.warning("WALLET_ENCRYPTION_KEY non trovata nel .env!")
+    logger.warning(f"Aggiungi questa riga al tuo {env_file}:")
+    logger.warning(f"WALLET_ENCRYPTION_KEY={_new_key}")
+    logger.warning("=" * 60)
+    _enc_key = _new_key
+else:
+    _enc_key = WALLET_ENCRYPTION_KEY
+
+DATA_DIR    = Path(os.getenv('DATA_DIR', 'data'))
+wallet_store = WalletStore(DATA_DIR, _enc_key)
 
 
 # ---------------------------------------------------------------------------
@@ -287,6 +312,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/threshold [X|reset] — soglia alert personale\n"
         "/pricespike [N|status] — spike improvvisi poll-to-poll\n"
         "/symbols — simboli disponibili\n"
+        "/setaddress 0x... — imposta wallet address\n"
+        "/setkey 0x...     — imposta chiave API (cifrata)\n"
+        "/walletinfo       — stato credenziali\n"
+        "/positions        — posizioni aperte su Hyperliquid\n"
         "/stats — statistiche bot\n"
         "/help — questo messaggio\n"
     )
@@ -652,6 +681,185 @@ def save_daily_snapshot(prices: Dict[str, Tuple[float, str, Optional[str]]]) -> 
 
 
 # ---------------------------------------------------------------------------
+# Comandi wallet / API Hyperliquid
+# ---------------------------------------------------------------------------
+
+def _is_wallet_allowed(chat_id: int) -> bool:
+    """True se il chat_id è autorizzato a usare i comandi wallet."""
+    return not WALLET_ALLOWED_CHATS or chat_id in WALLET_ALLOWED_CHATS
+
+
+async def setaddress(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /setaddress 0x...  — salva il tuo account address Hyperliquid (pubblico).
+    Necessario per /positions e futuri comandi di trading.
+    """
+    chat_id = update.effective_chat.id
+    if not _is_wallet_allowed(chat_id):
+        await update.message.reply_text("❌ Non autorizzato.")
+        return
+
+    if not context.args:
+        addr = wallet_store.get_address(chat_id)
+        if addr:
+            short = f"{addr[:6]}...{addr[-4:]}"
+            await update.message.reply_text(
+                f"📍 Address attuale: `{short}`\n\n"
+                f"Per cambiarlo: /setaddress 0x...",
+                parse_mode='Markdown'
+            )
+        else:
+            await update.message.reply_text(
+                "📍 Nessun address impostato.\n"
+                "Usa: /setaddress 0x7D5..."
+            )
+        return
+
+    address = context.args[0].strip()
+    if not address.startswith('0x') or len(address) < 20:
+        await update.message.reply_text("❌ Address non valido. Deve iniziare con 0x.")
+        return
+
+    wallet_store.save_address(chat_id, address)
+    short = f"{address[:6]}...{address[-4:]}"
+    # Cancella il messaggio con l'address per sicurezza
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+    await update.effective_chat.send_message(
+        f"✅ Address salvato: `{short}`\n"
+        f"Ora puoi usare /positions per vedere le tue posizioni aperte.",
+        parse_mode='Markdown'
+    )
+
+
+async def setkey(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /setkey 0x...  — salva la private key API (cifrata su disco).
+    Necessaria per i futuri comandi di trading (close, stop loss, ecc.).
+    IMPORTANTE: invia il comando in chat privata col bot, non in gruppi.
+    """
+    chat_id = update.effective_chat.id
+    if not _is_wallet_allowed(chat_id):
+        await update.message.reply_text("❌ Non autorizzato.")
+        return
+
+    if not context.args:
+        has = wallet_store.has_key(chat_id)
+        await update.message.reply_text(
+            f"🔑 Chiave API: {'✅ impostata' if has else '❌ non impostata'}\n\n"
+            f"Per impostarla: /setkey 0x...\n"
+            f"⚠️ Invia solo in chat privata col bot."
+        )
+        return
+
+    key = context.args[0].strip()
+    if not key.startswith('0x') or len(key) < 20:
+        await update.message.reply_text("❌ Chiave non valida.")
+        return
+
+    # Cancella subito il messaggio con la chiave
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    wallet_store.save_key(chat_id, key)
+    await update.effective_chat.send_message(
+        "✅ *Chiave API salvata* (cifrata su disco).\n"
+        "Il messaggio con la chiave è stato cancellato.",
+        parse_mode='Markdown'
+    )
+
+
+async def walletinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /walletinfo  — mostra lo stato delle credenziali salvate.
+    """
+    chat_id = update.effective_chat.id
+    if not _is_wallet_allowed(chat_id):
+        await update.message.reply_text("❌ Non autorizzato.")
+        return
+
+    addr = wallet_store.get_address(chat_id)
+    has_key = wallet_store.has_key(chat_id)
+    addr_str = f"`{addr[:6]}...{addr[-4:]}`" if addr else "❌ non impostato"
+
+    await update.message.reply_text(
+        f"🔐 *Wallet Info*\n\n"
+        f"📍 Address: {addr_str}\n"
+        f"🔑 Chiave API: {'✅ impostata' if has_key else '❌ non impostata'}\n\n"
+        f"Comandi:\n"
+        f"/setaddress 0x... — imposta address\n"
+        f"/setkey 0x...     — imposta chiave API\n"
+        f"/positions        — posizioni aperte",
+        parse_mode='Markdown'
+    )
+
+
+async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /positions  — mostra le posizioni aperte su Hyperliquid.
+    Richiede solo l'address pubblico (/setaddress).
+    """
+    chat_id = update.effective_chat.id
+    if not _is_wallet_allowed(chat_id):
+        await update.message.reply_text("❌ Non autorizzato.")
+        return
+
+    addr = wallet_store.get_address(chat_id)
+    if not addr:
+        await update.message.reply_text(
+            "❌ Address non impostato.\n"
+            "Usa prima /setaddress 0x..."
+        )
+        return
+
+    await update.message.reply_text("⏳ Recupero posizioni...")
+
+    try:
+        client  = HyperliquidClient(addr)
+        pos_list = await asyncio.get_event_loop().run_in_executor(
+            None, client.get_positions
+        )
+        summary = await asyncio.get_event_loop().run_in_executor(
+            None, client.get_account_summary
+        )
+    except Exception as e:
+        logger.error(f"Errore get_positions chat {chat_id}: {e}")
+        await update.message.reply_text(f"❌ Errore API: {e}")
+        return
+
+    if not pos_list:
+        await update.message.reply_text("📭 Nessuna posizione aperta.")
+        return
+
+    now = datetime.now().strftime('%H:%M:%S')
+    msg = f"📊 *Posizioni aperte* — {now}\n"
+    msg += f"Equity: ${summary['account_value']:,.2f}  Margin: ${summary['total_margin']:,.2f}\n"
+    msg += "─" * 30 + "\n"
+
+    for p in pos_list:
+        arrow    = "📈 LONG" if p['is_long'] else "📉 SHORT"
+        pnl_sign = "+" if p['unrealized'] >= 0 else ""
+        pnl_col  = p['unrealized']
+        pnl_pct  = pnl_col / p['margin'] * 100 if p['margin'] else 0
+        entry    = p['entry_px']
+        liq      = p['liq_px']
+        fmt_px   = lambda x: f"{x:,.5g}"
+
+        msg += (
+            f"\n{arrow} *{p['coin']}* {p['leverage']}x\n"
+            f"  Size: {abs(p['size'])}  Entry: {fmt_px(entry)}\n"
+            f"  PnL: {pnl_sign}${pnl_col:.2f} ({pnl_sign}{pnl_pct:.1f}%)\n"
+            f"  Liq: {fmt_px(liq)}\n"
+        )
+
+    await update.message.reply_text(msg, parse_mode='Markdown')
+
+
+# ---------------------------------------------------------------------------
 # Polling task — BATCH: 2 chiamate HTTP per tutti i simboli monitorati
 # ---------------------------------------------------------------------------
 
@@ -816,6 +1024,10 @@ def main():
     app.add_handler(CommandHandler("list",        list_subscriptions))
     app.add_handler(CommandHandler("symbols",     symbols_command))
     app.add_handler(CommandHandler("stats",       stats))
+    app.add_handler(CommandHandler("setaddress",  setaddress))
+    app.add_handler(CommandHandler("setkey",      setkey))
+    app.add_handler(CommandHandler("walletinfo",  walletinfo))
+    app.add_handler(CommandHandler("positions",   positions))
 
     app.post_init     = post_init
     app.post_shutdown = post_shutdown
