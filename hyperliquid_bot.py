@@ -720,7 +720,8 @@ async def price_polling_task(application: Application):
                 xyz_syms = set()
                 if all_prices:
                     xyz_syms = {sym for sym, (_, _, dex) in all_prices.items() if dex and dex.upper() == 'XYZ'}
-                spike_symbols = (xyz_syms | set(SPIKE_EXTRA_SYMBOLS)) - SPIKE_EXCLUDE_SYMBOLS
+                spike_symbols_all   = xyz_syms | set(SPIKE_EXTRA_SYMBOLS)           # tutti: prev prices + snapshot
+                spike_symbols_alert = spike_symbols_all - SPIKE_EXCLUDE_SYMBOLS  # solo questi generano alert
 
                 # Usa all_prices se già fetchato, altrimenti fetcha ora
                 prices_batch = all_prices if all_prices else await monitor.fetch_all_prices()
@@ -728,13 +729,14 @@ async def price_polling_task(application: Application):
                 # Accumula spike per chat_id: {chat_id: [righe]}
                 spike_alerts: Dict[int, list] = {}
 
-                for sym in spike_symbols:
+                for sym in spike_symbols_all:
                     if sym not in prices_batch:
                         continue
                     price_val, mtype, dex = prices_batch[sym]
                     prev = monitor.spike_prev_prices.get(sym)
 
-                    if prev is not None and prev > 0:
+                    # Alert solo per i simboli non esclusi
+                    if prev is not None and prev > 0 and sym in spike_symbols_alert:
                         pct = (price_val - prev) / prev * 100
                         for chat_id in monitor.spike_subscribers:
                             thresh = monitor.get_spike_threshold(chat_id)
@@ -747,6 +749,7 @@ async def price_polling_task(application: Application):
                                     f"  ${prev:,.6f}  →  ${price_val:,.6f}  ({pct:+.2f}%)"
                                 )
 
+                    # Aggiorna sempre il prezzo precedente (anche per gli esclusi)
                     monitor.spike_prev_prices[sym] = price_val
 
                 # Invia un unico messaggio per chat con tutti gli spike
@@ -768,8 +771,8 @@ async def price_polling_task(application: Application):
                 prices_batch = all_prices.copy() if all_prices else await monitor.fetch_all_prices()
                 # Snapshot solo dei simboli monitorati da pricespike (xyz + extra)
                 xyz_syms = {sym for sym, (_, _, dex) in prices_batch.items() if dex and dex.upper() == 'XYZ'}
-                spike_symbols = (xyz_syms | set(SPIKE_EXTRA_SYMBOLS)) - SPIKE_EXCLUDE_SYMBOLS
-                prices_to_snap = {sym: v for sym, v in prices_batch.items() if sym in spike_symbols}
+                spike_symbols_all = xyz_syms | set(SPIKE_EXTRA_SYMBOLS)  # snapshot include anche gli esclusi
+                prices_to_snap = {sym: v for sym, v in prices_batch.items() if sym in spike_symbols_all}
                 if prices_to_snap:
                     written = save_daily_snapshot(prices_to_snap)
                     monitor.last_snapshot_date = today
