@@ -55,7 +55,8 @@ file_handler.setFormatter(fmt)
 file_handler.suffix = '%Y-%m-%d'
 
 root_logger = logging.getLogger()
-root_logger.setLevel(logging.INFO)
+_log_level = getattr(logging, os.getenv('LOG_LEVEL', 'INFO').upper(), logging.INFO)
+root_logger.setLevel(_log_level)
 root_logger.addHandler(console_handler)
 root_logger.addHandler(file_handler)
 

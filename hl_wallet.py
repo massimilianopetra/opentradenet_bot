@@ -149,7 +149,13 @@ class HyperliquidClient:
         state      = info.user_state(self.account_address)
         positions  = []
 
-        for ap in state.get('assetPositions', []):
+        logger.debug(f"user_state keys: {list(state.keys())}")
+        asset_positions = state.get('assetPositions', [])
+        logger.debug(f"assetPositions count: {len(asset_positions)}")
+        for i, ap in enumerate(asset_positions[:3]):
+            logger.debug(f"  ap[{i}]: {ap}")
+
+        for ap in asset_positions:
             pos = ap.get('position', {})
             szi = float(pos.get('szi', 0))
             if szi == 0:
