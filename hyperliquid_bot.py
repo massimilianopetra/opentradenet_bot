@@ -1161,11 +1161,15 @@ async def price_polling_task(application: Application):
                             liq      = track['liq_px']
                             liq_dist = abs((liq - current_price) / current_price * 100) if liq else 0
                             logger.info(f"TRACK ALERT {coin}: {pct:+.2f}% -> chat {chat_id}")
+                            entry_px  = track['entry_px']
+                            pct_entry = (current_price - entry_px) / entry_px * 100 if entry_px else 0
+                            pnl_pct   = pnl / track['margin'] * 100 if track['margin'] else 0
                             track_alerts.setdefault(chat_id, []).append(
                                 f"{arrow} *{coin}* {'LONG' if is_long else 'SHORT'} "
                                 f"_{track['dex']}_ {track['leverage']}x  {favor_s}\n"
                                 f"  Rif: ${base:,.2f}  →  ${current_price:,.2f}  ({pct:+.2f}%)\n"
-                                f"  Entry: ${track['entry_px']:,.2f}   PnL: {pnl_s}${pnl:.2f}\n"
+                                f"  Entry: ${entry_px:,.2f}  →  ${current_price:,.2f}  ({pct_entry:+.2f}%)\n"
+                                f"  PnL: {pnl_s}${pnl:.2f} ({pnl_s}{pnl_pct:.1f}%)\n"
                                 f"  Liq dist: {liq_dist:.1f}%"
                             )
                             track_triggered.append((chat_id, coin, current_price))
