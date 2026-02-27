@@ -140,42 +140,62 @@ class HyperliquidClient:
                                         account_address=self.account_address)
         return self._exchange
 
-    def get_positions(self) -> list:
+    def get_positions(self, extra_dexs: list = None) -> list:
         """
         Restituisce le posizioni aperte come lista di dict.
+        Legge il dex principale (perp standard) + tutti i dex extra (es. ['xyz']).
         Non richiede private key.
         """
-        info       = self._get_info()
-        state      = info.user_state(self.account_address)
-        positions  = []
+        info      = self._get_info()
+        positions = []
 
-        logger.debug(f"user_state keys: {list(state.keys())}")
-        asset_positions = state.get('assetPositions', [])
-        logger.debug(f"assetPositions count: {len(asset_positions)}")
-        for i, ap in enumerate(asset_positions[:3]):
-            logger.debug(f"  ap[{i}]: {ap}")
+        # Legge tutti i dex: "" = perp standard, + quelli extra (xyz ecc.)
+        dexs_to_query = [''] + (extra_dexs or [])
 
-        for ap in asset_positions:
-            pos = ap.get('position', {})
-            szi = float(pos.get('szi', 0))
-            if szi == 0:
-                continue
-            entry_px  = float(pos.get('entryPx', 0) or 0)
-            unrealized = float(pos.get('unrealizedPnl', 0) or 0)
-            liq_px    = float(pos.get('liquidationPx', 0) or 0)
-            margin    = pos.get('marginUsed', '0')
-            leverage  = pos.get('leverage', {})
-            lev_val   = leverage.get('value', '?') if isinstance(leverage, dict) else '?'
-            positions.append({
-                'coin':         pos.get('coin', '?'),
-                'size':         szi,
-                'entry_px':     entry_px,
-                'unrealized':   unrealized,
-                'liq_px':       liq_px,
-                'margin':       float(margin or 0),
-                'leverage':     lev_val,
-                'is_long':      szi > 0,
-            })
+        for dex in dexs_to_query:
+            try:
+                if dex == '':
+                    state = info.user_state(self.account_address)
+                else:
+                    # clearinghouseState con dex specifico
+                    import requests
+                    resp  = requests.post(
+                        f'{self.API_URL}/info',
+                        json={'type': 'clearinghouseState', 'user': self.account_address, 'dex': dex},
+                        timeout=10
+                    )
+                    state = resp.json()
+
+                logger.debug(f"dex='{dex}' assetPositions: {len(state.get('assetPositions', []))}")
+
+                for ap in state.get('assetPositions', []):
+                    pos = ap.get('position', {})
+                    szi = float(pos.get('szi', 0))
+                    if szi == 0:
+                        continue
+                    entry_px   = float(pos.get('entryPx',       0) or 0)
+                    unrealized = float(pos.get('unrealizedPnl',  0) or 0)
+                    liq_px     = float(pos.get('liquidationPx',  0) or 0)
+                    margin     = float(pos.get('marginUsed',    '0') or 0)
+                    leverage   = pos.get('leverage', {})
+                    lev_val    = leverage.get('value', '?') if isinstance(leverage, dict) else '?'
+                    coin       = pos.get('coin', '?')
+                    # Per xyz il coin arriva come "xyz:NFLX" — rimuoviamo il prefisso per display
+                    coin_display = coin.split(':')[-1] if ':' in coin else coin
+                    positions.append({
+                        'coin':         coin_display,
+                        'coin_raw':     coin,
+                        'dex':          dex or 'PERP',
+                        'size':         szi,
+                        'entry_px':     entry_px,
+                        'unrealized':   unrealized,
+                        'liq_px':       liq_px,
+                        'margin':       margin,
+                        'leverage':     lev_val,
+                        'is_long':      szi > 0,
+                    })
+            except Exception as e:
+                logger.error(f"Errore get_positions dex='{dex}': {e}")
 
         return positions
 

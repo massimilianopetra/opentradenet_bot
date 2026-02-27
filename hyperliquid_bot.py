@@ -820,9 +820,9 @@ async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Recupero posizioni...")
 
     try:
-        client  = HyperliquidClient(addr)
+        client   = HyperliquidClient(addr)
         pos_list = await asyncio.get_event_loop().run_in_executor(
-            None, client.get_positions
+            None, lambda: client.get_positions(extra_dexs=SUPPORTED_DEXS)
         )
         summary = await asyncio.get_event_loop().run_in_executor(
             None, client.get_account_summary
@@ -836,25 +836,24 @@ async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📭 Nessuna posizione aperta.")
         return
 
-    now = datetime.now().strftime('%H:%M:%S')
-    msg = f"📊 *Posizioni aperte* — {now}\n"
-    msg += f"Equity: ${summary['account_value']:,.2f}  Margin: ${summary['total_margin']:,.2f}\n"
-    msg += "─" * 30 + "\n"
+    now    = datetime.now().strftime('%H:%M:%S')
+    msg    = f"📊 *Posizioni aperte* — {now}\n"
+    msg   += f"Equity: ${summary['account_value']:,.2f}  Margin: ${summary['total_margin']:,.2f}\n"
+    msg   += "─" * 30 + "\n"
+    fmt_px = lambda x: f"{x:,.5g}"
 
     for p in pos_list:
         arrow    = "📈 LONG" if p['is_long'] else "📉 SHORT"
         pnl_sign = "+" if p['unrealized'] >= 0 else ""
         pnl_col  = p['unrealized']
         pnl_pct  = pnl_col / p['margin'] * 100 if p['margin'] else 0
-        entry    = p['entry_px']
-        liq      = p['liq_px']
-        fmt_px   = lambda x: f"{x:,.5g}"
+        dex_tag  = f" _{p['dex']}_" if p.get('dex', 'PERP') != 'PERP' else ""
 
         msg += (
-            f"\n{arrow} *{p['coin']}* {p['leverage']}x\n"
-            f"  Size: {abs(p['size'])}  Entry: {fmt_px(entry)}\n"
+            f"\n{arrow} *{p['coin']}*{dex_tag} {p['leverage']}x\n"
+            f"  Size: {abs(p['size'])}  Entry: {fmt_px(p['entry_px'])}\n"
             f"  PnL: {pnl_sign}${pnl_col:.2f} ({pnl_sign}{pnl_pct:.1f}%)\n"
-            f"  Liq: {fmt_px(liq)}\n"
+            f"  Liq: {fmt_px(p['liq_px'])}\n"
         )
 
     await update.message.reply_text(msg, parse_mode='Markdown')
