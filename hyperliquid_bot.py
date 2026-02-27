@@ -95,6 +95,9 @@ SPIKE_EXCLUDE_SYMBOLS  = {s.strip().upper() for s in os.getenv('SPIKE_EXCLUDE_SY
 PRICES_DIR    = Path(os.getenv('PRICES_DIR', 'data/prices'))
 PRICES_TIME   = int(os.getenv('PRICES_TIME', '9'))  # ora intera (0-23)
 
+# Intervallo aggiornamento position tracking (default 5 minuti)
+POSITION_TRACK_INTERVAL = int(os.getenv('POSITION_TRACK_INTERVAL', '300'))
+
 # Whitelist chat_id autorizzati a usare comandi wallet/trading (separati da virgola)
 # Es: WALLET_ALLOWED_CHATS=123456789,987654321
 # Se vuoto: tutti gli utenti possono registrare le loro credenziali
@@ -142,6 +145,10 @@ class HyperliquidPriceMonitor:
         self.spike_subscribers: Set[int]             = set()  # chat_id iscritti a pricespike
         self.spike_prev_prices: Dict[str, float]     = {}     # prezzi poll precedente per pricespike
         self.last_snapshot_date: Optional[date]       = None   # data dell'ultimo snapshot giornaliero scritto
+        # Position tracking: {chat_id: {coin: {entry_px, is_long, size, margin, leverage, dex, alert_base, added_at}}}
+        self.position_tracks:   Dict[int, Dict[str, dict]] = {}
+        # chat_id con tracking attivo (default: tutti quelli con address configurato)
+        self.tracking_enabled:  Set[int]                   = set()
         self.session: Optional[aiohttp.ClientSession] = None
 
     async def init_session(self):
@@ -317,6 +324,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/setkey 0x...     — imposta chiave API (cifrata)\n"
         "/walletinfo       — stato credenziali\n"
         "/positions        — posizioni aperte su Hyperliquid\n"
+        "/trackpositions   — attiva/disattiva tracking automatico posizioni\n"
         "/stats — statistiche bot\n"
         "/help — questo messaggio\n"
     )
@@ -538,34 +546,78 @@ async def list_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE)
     chat_id = update.effective_chat.id
     subs = monitor.get_subscriptions(chat_id)
 
-    if not subs:
-        await update.message.reply_text("📋 Nessuna sottoscrizione attiva.\nUsa /subscribe SYMBOL per iniziare!")
+    tracks = monitor.position_tracks.get(chat_id, {})
+
+    if not subs and not tracks:
+        await update.message.reply_text(
+            "📋 Nessuna sottoscrizione attiva e nessuna posizione in tracking.\n"
+            "Usa /subscribe SYMBOL per monitorare un simbolo.\n"
+            "Usa /setaddress per attivare il position tracking automatico."
+        )
         return
 
     # Fetch prezzi correnti in batch
     all_prices = await monitor.fetch_all_prices()
+    threshold  = monitor.get_threshold(chat_id)
+    msg        = ""
 
-    threshold = monitor.get_threshold(chat_id)
-    msg = f"📋 *Le tue sottoscrizioni* (soglia: ±{threshold}%):\n\n"
-    for sym in sorted(subs):
-        base    = monitor.alert_base_prices.get(sym)   # prezzo al subscribe (o ultimo alert)
-        current_info = all_prices.get(sym)
-        current = current_info[0] if current_info else monitor.last_prices.get(sym)
+    # --- Sezione position tracking ---
+    if tracks:
+        msg += f"📊 *Position Tracking* (soglia: ±{threshold}%):\n\n"
+        for coin, track in sorted(tracks.items()):
+            price_info    = all_prices.get(coin)
+            current_price = price_info[0] if price_info else None
+            entry         = track['entry_px']
+            base          = track['alert_base']
+            is_long       = track['is_long']
+            pnl           = track['unrealized']
+            pnl_s         = "+" if pnl >= 0 else ""
+            pnl_pct       = pnl / track['margin'] * 100 if track['margin'] else 0
+            liq           = track['liq_px']
+            fmt           = lambda x: f"{x:,.5g}"
 
-        if base and current:
-            pct   = (current - base) / base * 100
-            arrow = "📈" if pct > 0 else "📉" if pct < 0 else "➡️"
+            arrow_dir = "📈" if is_long else "📉"
+            dir_s     = "LONG" if is_long else "SHORT"
+
+            if current_price and base:
+                pct_from_base = (current_price - base) / base * 100
+                arrow_p = "📈" if pct_from_base > 0 else "📉" if pct_from_base < 0 else "➡️"
+                pct_str = f"  {arrow_p} Da entry: {pct_from_base:+.2f}%\n"
+            else:
+                pct_str = ""
+
+            liq_dist = abs((liq - (current_price or entry)) / (current_price or entry) * 100) if liq else 0
+
             msg += (
-                f"• *{sym}*\n"
-                f"  Riferimento: ${base:,.6f}\n"
-                f"  Attuale:     ${current:,.6f}  {arrow} {pct:+.2f}%\n\n"
+                f"{arrow_dir} *{coin}* {dir_s} _{track['dex']}_ {track['leverage']}x\n"
+                f"  Entry: {fmt(entry)}  Size: {abs(track['size'])}\n"
+                f"  PnL: {pnl_s}${pnl:.2f} ({pnl_s}{pnl_pct:.1f}%)\n"
+                f"{pct_str}"
+                f"  Liq: {fmt(liq)} (dist: {liq_dist:.1f}%)\n\n"
             )
-        elif current:
-            msg += f"• *{sym}* — ${current:,.6f}\n\n"
-        else:
-            msg += f"• *{sym}* — prezzo non ancora disponibile\n\n"
 
-    await update.message.reply_text(msg, parse_mode='Markdown')
+    # --- Sezione subscribe manuali ---
+    if subs:
+        msg += f"📋 *Subscribe manuali* (soglia: ±{threshold}%):\n\n"
+        for sym in sorted(subs):
+            base         = monitor.alert_base_prices.get(sym)
+            current_info = all_prices.get(sym)
+            current      = current_info[0] if current_info else monitor.last_prices.get(sym)
+
+            if base and current:
+                pct   = (current - base) / base * 100
+                arrow = "📈" if pct > 0 else "📉" if pct < 0 else "➡️"
+                msg  += (
+                    f"• *{sym}*\n"
+                    f"  Riferimento: ${base:,.6f}\n"
+                    f"  Attuale:     ${current:,.6f}  {arrow} {pct:+.2f}%\n\n"
+                )
+            elif current:
+                msg += f"• *{sym}* — ${current:,.6f}\n\n"
+            else:
+                msg += f"• *{sym}* — prezzo non ancora disponibile\n\n"
+
+    await update.message.reply_text(msg.strip(), parse_mode='Markdown')
 
 async def symbols_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔍 Recupero simboli...")
@@ -682,6 +734,58 @@ def save_daily_snapshot(prices: Dict[str, Tuple[float, str, Optional[str]]]) -> 
 
 
 # ---------------------------------------------------------------------------
+# Position tracking
+# ---------------------------------------------------------------------------
+
+async def trackpositions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /trackpositions        — mostra stato
+    /trackpositions on     — attiva (default)
+    /trackpositions off    — disattiva
+    """
+    chat_id = update.effective_chat.id
+    arg     = context.args[0].lower() if context.args else ''
+
+    if not wallet_store.get_address(chat_id):
+        await update.message.reply_text(
+            "❌ Imposta prima il tuo address con /setaddress 0x..."
+        )
+        return
+
+    if arg == 'off':
+        monitor.tracking_enabled.discard(chat_id)
+        monitor.position_tracks.pop(chat_id, None)
+        logger.info(f"Chat {chat_id} position tracking disattivato")
+        await update.message.reply_text("⏸ *Position tracking disattivato.*", parse_mode='Markdown')
+        return
+
+    if arg == 'on' or not arg:
+        monitor.tracking_enabled.add(chat_id)
+        logger.info(f"Chat {chat_id} position tracking attivato")
+        n = len(monitor.position_tracks.get(chat_id, {}))
+        await update.message.reply_text(
+            f"✅ *Position tracking attivo*\n\n"
+            f"Le tue posizioni aperte vengono monitorate automaticamente.\n"
+            f"Aggiornamento ogni {POSITION_TRACK_INTERVAL//60} minuti.\n"
+            f"Posizioni in tracking: {n}\n\n"
+            f"Usa /trackpositions off per disattivare.",
+            parse_mode='Markdown'
+        )
+        return
+
+    # status
+    active = chat_id in monitor.tracking_enabled
+    tracks = monitor.position_tracks.get(chat_id, {})
+    await update.message.reply_text(
+        f"📊 *Position Tracking* — {'✅ attivo' if active else '⏸ non attivo'}\n"
+        f"Posizioni tracciate: {len(tracks)}\n"
+        f"Aggiornamento: ogni {POSITION_TRACK_INTERVAL//60} min\n\n"
+        f"/trackpositions on/off",
+        parse_mode='Markdown'
+    )
+
+
+# ---------------------------------------------------------------------------
 # Comandi wallet / API Hyperliquid
 # ---------------------------------------------------------------------------
 
@@ -723,6 +827,8 @@ async def setaddress(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     wallet_store.save_address(chat_id, address)
     short = f"{address[:6]}...{address[-4:]}"
+    # Tracking on per default
+    monitor.tracking_enabled.add(chat_id)
     # Cancella il messaggio con l'address per sicurezza
     try:
         await update.message.delete()
@@ -730,7 +836,9 @@ async def setaddress(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
     await update.effective_chat.send_message(
         f"✅ Address salvato: `{short}`\n"
-        f"Ora puoi usare /positions per vedere le tue posizioni aperte.",
+        f"🎯 Position tracking *attivato automaticamente*.\n"
+        f"Riceverai notifiche sulle tue posizioni aperte.\n"
+        f"Usa /trackpositions off per disattivarlo.",
         parse_mode='Markdown'
     )
 
@@ -857,6 +965,138 @@ async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     await update.message.reply_text(msg, parse_mode='Markdown')
+
+
+# ---------------------------------------------------------------------------
+# Position tracking task — aggiorna ogni POSITION_TRACK_INTERVAL secondi
+# ---------------------------------------------------------------------------
+
+async def position_tracking_task(application: Application):
+    logger.info(f"🎯 Task position tracking avviato (ogni {POSITION_TRACK_INTERVAL}s)")
+
+    while True:
+        try:
+            for chat_id in list(monitor.tracking_enabled):
+                addr = wallet_store.get_address(chat_id)
+                if not addr:
+                    continue
+
+                try:
+                    client   = HyperliquidClient(addr)
+                    pos_list = await asyncio.get_event_loop().run_in_executor(
+                        None, lambda: client.get_positions(extra_dexs=SUPPORTED_DEXS)
+                    )
+                except Exception as e:
+                    logger.error(f"Position tracking fetch error chat {chat_id}: {e}")
+                    continue
+
+                current_tracks = monitor.position_tracks.get(chat_id, {})
+                new_tracks     = {}
+                threshold      = monitor.get_threshold(chat_id)
+
+                # Simboli attualmente aperti dall'API
+                for p in pos_list:
+                    coin = p['coin']
+                    # Recupera prezzo corrente dal monitor (già in cache dal polling 10s)
+                    price_info   = monitor.last_prices.get(coin)
+                    current_price = price_info if price_info else p['entry_px']
+
+                    if coin in current_tracks:
+                        # Posizione già tracciata — aggiorna dati e controlla alert
+                        track = current_tracks[coin].copy()
+                        track['size']      = p['size']
+                        track['margin']    = p['margin']
+                        track['unrealized'] = p['unrealized']
+                        track['liq_px']    = p['liq_px']
+
+                        # Alert se il prezzo varia dalla base oltre la soglia
+                        base = track['alert_base']
+                        if base and base > 0 and current_price:
+                            pct = (current_price - base) / base * 100
+                            if abs(pct) >= threshold:
+                                arrow   = "📈" if pct > 0 else "📉"
+                                is_long = track['is_long']
+                                # Positivo per long se sale, per short se scende
+                                favor   = (pct > 0 and is_long) or (pct < 0 and not is_long)
+                                favor_s = "✅ a favore" if favor else "⚠️ contro"
+                                pnl     = p['unrealized']
+                                pnl_s   = "+" if pnl >= 0 else ""
+                                liq_dist = abs((p['liq_px'] - current_price) / current_price * 100) if p['liq_px'] else 0
+                                alert_msg = (
+                                    f"{arrow} *{coin}* {'LONG' if is_long else 'SHORT'} _{track['dex']}_ {track['leverage']}x\n\n"
+                                    f"Variazione: {pct:+.2f}% {favor_s}\n"
+                                    f"Entry: ${base:,.5g}  →  ${current_price:,.5g}\n"
+                                    f"PnL: {pnl_s}${pnl:.2f}\n"
+                                    f"Distanza liq: {liq_dist:.1f}%\n"
+                                    f"⏰ {datetime.now().strftime('%H:%M:%S')}"
+                                )
+                                try:
+                                    await application.bot.send_message(
+                                        chat_id=chat_id, text=alert_msg, parse_mode='Markdown'
+                                    )
+                                    logger.info(f"TRACK ALERT {coin}: {pct:+.2f}% -> chat {chat_id}")
+                                    track['alert_base'] = current_price  # aggiorna base dopo alert
+                                except Exception as e:
+                                    logger.error(f"Errore invio track alert {chat_id}: {e}")
+
+                        new_tracks[coin] = track
+
+                    else:
+                        # Nuova posizione rilevata — aggiungi al tracking
+                        new_tracks[coin] = {
+                            'entry_px':   p['entry_px'],
+                            'is_long':    p['is_long'],
+                            'size':       p['size'],
+                            'margin':     p['margin'],
+                            'leverage':   p['leverage'],
+                            'dex':        p.get('dex', 'PERP'),
+                            'unrealized': p['unrealized'],
+                            'liq_px':     p['liq_px'],
+                            'alert_base': p['entry_px'],  # base = entry price
+                            'added_at':   datetime.now(),
+                        }
+                        logger.info(f"TRACK NEW {coin} ({'L' if p['is_long'] else 'S'}) -> chat {chat_id}")
+                        try:
+                            await application.bot.send_message(
+                                chat_id=chat_id,
+                                text=(
+                                    f"🎯 *Nuova posizione rilevata*\n\n"
+                                    f"{'📈 LONG' if p['is_long'] else '📉 SHORT'} *{coin}* "
+                                    f"_{p.get('dex','PERP')}_ {p['leverage']}x\n"
+                                    f"Entry: ${p['entry_px']:,.5g}  Size: {abs(p['size'])}\n"
+                                    f"Margin: ${p['margin']:.2f}  Liq: ${p['liq_px']:,.5g}\n"
+                                    f"Soglia alert: ±{threshold}%"
+                                ),
+                                parse_mode='Markdown'
+                            )
+                        except Exception as e:
+                            logger.error(f"Errore notifica nuova posizione {chat_id}: {e}")
+
+                # Posizioni chiuse: erano in track ma non più nell'API
+                closed = set(current_tracks.keys()) - set(new_tracks.keys())
+                for coin in closed:
+                    track = current_tracks[coin]
+                    logger.info(f"TRACK CLOSED {coin} -> chat {chat_id}")
+                    try:
+                        await application.bot.send_message(
+                            chat_id=chat_id,
+                            text=(
+                                f"🏁 *Posizione chiusa*: *{coin}*\n"
+                                f"{'LONG' if track['is_long'] else 'SHORT'} _{track['dex']}_ {track['leverage']}x\n"
+                                f"Entry: ${track['entry_px']:,.5g}\n"
+                                f"⏰ {datetime.now().strftime('%H:%M:%S')}"
+                            ),
+                            parse_mode='Markdown'
+                        )
+                    except Exception as e:
+                        logger.error(f"Errore notifica chiusura {chat_id}: {e}")
+
+                monitor.position_tracks[chat_id] = new_tracks
+
+        except Exception as e:
+            logger.error(f"Errore nel position tracking task: {e}", exc_info=True)
+
+        await asyncio.sleep(POSITION_TRACK_INTERVAL)
 
 
 # ---------------------------------------------------------------------------
@@ -1001,7 +1241,21 @@ async def price_polling_task(application: Application):
 
 async def post_init(application: Application):
     logger.info(f"Bot avviato. POLL={POLL_INTERVAL}s THRESHOLD={PRICE_CHANGE_THRESHOLD}%")
+
+    # Riattiva tracking per tutti gli utenti che hanno già un address su disco
+    wallet_dir = DATA_DIR / 'wallet'
+    if wallet_dir.exists():
+        for user_dir in wallet_dir.iterdir():
+            if user_dir.is_dir() and (user_dir / 'address.txt').exists():
+                try:
+                    chat_id = int(user_dir.name)
+                    monitor.tracking_enabled.add(chat_id)
+                    logger.info(f"Position tracking riattivato per chat {chat_id}")
+                except ValueError:
+                    pass
+
     asyncio.create_task(price_polling_task(application))
+    asyncio.create_task(position_tracking_task(application))
 
 async def post_shutdown(application: Application):
     await monitor.close_session()
@@ -1027,7 +1281,8 @@ def main():
     app.add_handler(CommandHandler("setaddress",  setaddress))
     app.add_handler(CommandHandler("setkey",      setkey))
     app.add_handler(CommandHandler("walletinfo",  walletinfo))
-    app.add_handler(CommandHandler("positions",   positions))
+    app.add_handler(CommandHandler("positions",      positions))
+    app.add_handler(CommandHandler("trackpositions", trackpositions))
 
     app.post_init     = post_init
     app.post_shutdown = post_shutdown
