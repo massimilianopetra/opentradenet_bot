@@ -1019,7 +1019,7 @@ async def position_tracking_task(application: Application):
                             'dex':        p.get('dex', 'PERP'),
                             'unrealized': p['unrealized'],
                             'liq_px':     p['liq_px'],
-                            'alert_base': p['entry_px'],  # base = entry price
+                            'alert_base': monitor.last_prices.get(p['coin'], p['entry_px']),  # prezzo corrente al rilevamento
                             'added_at':   datetime.now(),
                         }
                         logger.info(f"TRACK NEW {coin} ({'L' if p['is_long'] else 'S'}) -> chat {chat_id}")
@@ -1157,8 +1157,9 @@ async def price_polling_task(application: Application):
                             track_alerts.setdefault(chat_id, []).append(
                                 f"{arrow} *{coin}* {'LONG' if is_long else 'SHORT'} "
                                 f"_{track['dex']}_ {track['leverage']}x  {favor_s}\n"
-                                f"  Entry: ${track['entry_px']:,.5g}  →  ${current_price:,.5g}  ({pct:+.2f}%)\n"
-                                f"  PnL: {pnl_s}${pnl:.2f}   Liq dist: {liq_dist:.1f}%"
+                                f"  Rif: ${base:,.5g}  →  ${current_price:,.5g}  ({pct:+.2f}%)\n"
+                                f"  Entry: ${track['entry_px']:,.5g}   PnL: {pnl_s}${pnl:.2f}\n"
+                                f"  Liq dist: {liq_dist:.1f}%"
                             )
                             track_triggered.append((chat_id, coin, current_price))
 
