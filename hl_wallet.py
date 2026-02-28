@@ -207,58 +207,20 @@ class HyperliquidClient:
         Richiede private key.
         """
         if dex:
-            # Per xyz usiamo REST + firma tramite SDK
+            # Per xyz: istanzia Exchange con perp_dexs=['xyz']
+            # così info.name_to_asset() conosce GOLD, SILVER ecc.
             import eth_account
-            import requests
-            import time
-            from hyperliquid.utils.signing import sign_l1_action
+            from hyperliquid.exchange import Exchange
 
-            ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
-            wallet = eth_account.Account.from_key(self.private_key)
-
-            # Recupera l'asset index del coin nel dex xyz
-            meta_resp = requests.post(
-                f'{self.API_URL}/info',
-                json={'type': 'meta', 'dex': dex},
-                timeout=10
+            wallet       = eth_account.Account.from_key(self.private_key)
+            exchange_xyz = Exchange(
+                wallet,
+                self.API_URL,
+                account_address=self.account_address,
+                vault_address=None,
+                perp_dexs=[dex],
             )
-            meta     = meta_resp.json()
-            universe = meta.get('universe', [])
-            asset_idx = None
-            for i, asset in enumerate(universe):
-                name = asset.get('name', '')
-                if name.upper().replace('XYZ:', '') == coin.upper():
-                    asset_idx = i
-                    break
-
-            if asset_idx is None:
-                raise ValueError(f"Simbolo '{coin}' non trovato nel dex '{dex}'. "
-                                 f"Disponibili: {[a.get('name') for a in universe]}")
-
-            action = {
-                'type':     'updateLeverage',
-                'asset':    asset_idx,
-                'isCross':  is_cross,
-                'leverage': leverage,
-            }
-
-            nonce         = int(time.time() * 1000)
-            expires_after = nonce + 1000 * 60 * 60  # 1 ora
-
-            # Firma: (wallet, action, active_pool, nonce, expires_after, is_mainnet)
-            # active_pool = ZERO_ADDRESS per transazioni normali (non vault)
-            signature = sign_l1_action(wallet, action, ZERO_ADDRESS, nonce, expires_after, True)
-
-            # Il dex va nel payload, non nella firma
-            payload = {
-                'action':       action,
-                'nonce':        nonce,
-                'signature':    signature,
-                'vaultAddress': None,
-                'dex':          dex,
-            }
-            resp = requests.post(f'{self.API_URL}/exchange', json=payload, timeout=10)
-            return resp.json()
+            return exchange_xyz.update_leverage(leverage, coin, is_cross)
         else:
             # Perp standard — usa Exchange SDK
             exchange = self._get_exchange()
