@@ -207,13 +207,11 @@ class HyperliquidClient:
         Richiede private key.
         """
         if dex:
-            # Per xyz l'SDK non supporta dex alternativi — usiamo REST + firma EIP-712
-            # tramite le utility di firma dell'SDK stesso
+            # Per xyz usiamo REST + firma tramite SDK
             import eth_account
             import requests
             import time
             from hyperliquid.utils.signing import sign_l1_action
-            import inspect as _inspect
 
             ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
             wallet = eth_account.Account.from_key(self.private_key)
@@ -224,7 +222,7 @@ class HyperliquidClient:
                 json={'type': 'meta', 'dex': dex},
                 timeout=10
             )
-            meta = meta_resp.json()
+            meta     = meta_resp.json()
             universe = meta.get('universe', [])
             asset_idx = None
             for i, asset in enumerate(universe):
@@ -238,34 +236,26 @@ class HyperliquidClient:
                                  f"Disponibili: {[a.get('name') for a in universe]}")
 
             action = {
-                'type':      'updateLeverage',
-                'asset':     asset_idx,
-                'isCross':   is_cross,
-                'leverage':  leverage,
+                'type':     'updateLeverage',
+                'asset':    asset_idx,
+                'isCross':  is_cross,
+                'leverage': leverage,
             }
 
-            nonce = int(time.time() * 1000)
+            nonce         = int(time.time() * 1000)
+            expires_after = nonce + 1000 * 60 * 60  # 1 ora
 
-            # Firma adattiva: supporta versioni diverse dell'SDK
-            sig_params = list(_inspect.signature(sign_l1_action).parameters.keys())
-            logger.debug(f"sign_l1_action params: {sig_params}")
-            if 'expires_after' in sig_params:
-                # Versione nuova: sign_l1_action(wallet, action, vault, nonce, expires_after, is_mainnet, dex=)
-                expires_after = nonce + 1000 * 60 * 60  # 1 ora
-                if 'dex' in sig_params:
-                    signature = sign_l1_action(wallet, action, ZERO_ADDRESS, nonce, expires_after, True, dex=dex)
-                else:
-                    signature = sign_l1_action(wallet, action, ZERO_ADDRESS, nonce, expires_after, True)
-            elif 'dex' in sig_params:
-                signature = sign_l1_action(wallet, action, ZERO_ADDRESS, nonce, dex=dex)
-            else:
-                signature = sign_l1_action(wallet, action, ZERO_ADDRESS, nonce)
+            # Firma: (wallet, action, active_pool, nonce, expires_after, is_mainnet)
+            # active_pool = ZERO_ADDRESS per transazioni normali (non vault)
+            signature = sign_l1_action(wallet, action, ZERO_ADDRESS, nonce, expires_after, True)
 
+            # Il dex va nel payload, non nella firma
             payload = {
                 'action':       action,
                 'nonce':        nonce,
                 'signature':    signature,
                 'vaultAddress': None,
+                'dex':          dex,
             }
             resp = requests.post(f'{self.API_URL}/exchange', json=payload, timeout=10)
             return resp.json()
