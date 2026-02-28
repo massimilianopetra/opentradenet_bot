@@ -206,42 +206,36 @@ class HyperliquidClient:
         is_cross=False → isolated (default Hyperliquid)
         Richiede private key.
         """
-        exchange = self._get_exchange()
-
         if dex:
-            # Per xyz usa l'API diretta — l'SDK non supporta dex diversi
+            # Per xyz: istanzia un Exchange con il meta del dex specifico
+            # così l'SDK trova l'asset index corretto per SILVER, ORCL ecc.
             import eth_account
-            import json, time, requests
-            from eth_account.messages import encode_defunct
+            from hyperliquid.exchange import Exchange
+            from hyperliquid.info import Info
 
-            action = {
-                "type": "updateLeverage",
-                "asset": coin,
-                "isCross": is_cross,
-                "leverage": leverage,
-            }
-            if dex:
-                action["dex"] = dex
+            wallet   = eth_account.Account.from_key(self.private_key)
+            info_xyz = Info(self.API_URL, skip_ws=True)
 
-            nonce     = int(time.time() * 1000)
-            wallet    = eth_account.Account.from_key(self.private_key)
-            msg_hash  = encode_defunct(text=json.dumps(action, separators=(',', ':')))
-            signature = wallet.sign_message(msg_hash)
-            sig_str   = signature.signature.hex()
+            # Recupera meta del dex (contiene universe con asset index)
+            meta_ctxs = info_xyz.meta_and_asset_ctxs_by_dex(dex)
+            meta      = meta_ctxs[0] if meta_ctxs else None
 
-            payload = {
-                "action":    action,
-                "nonce":     nonce,
-                "signature": {"r": "0x" + sig_str[2:66],
-                              "s": "0x" + sig_str[66:130],
-                              "v": int(sig_str[130:], 16)},
-                "vaultAddress": None,
-            }
-            resp = requests.post(f"{self.API_URL}/exchange", json=payload, timeout=10)
-            return resp.json()
+            exchange_xyz = Exchange(
+                wallet,
+                self.API_URL,
+                account_address=self.account_address,
+                vault_address=None,
+            )
+            # Override del meta con quello del dex xyz
+            if meta:
+                exchange_xyz.meta = meta
+
+            result = exchange_xyz.update_leverage(leverage, coin, is_cross)
+            return result
         else:
-            # Perp standard — usa SDK
-            result = exchange.update_leverage(leverage, coin, is_cross)
+            # Perp standard — usa Exchange normale
+            exchange = self._get_exchange()
+            result   = exchange.update_leverage(leverage, coin, is_cross)
             return result
 
     def get_account_summary(self) -> dict:
