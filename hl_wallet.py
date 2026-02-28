@@ -207,20 +207,39 @@ class HyperliquidClient:
         Richiede private key.
         """
         if dex:
-            # Per xyz: istanzia Exchange con perp_dexs=['xyz']
-            # così info.name_to_asset() conosce GOLD, SILVER ecc.
+            # Per xyz: carichiamo il meta del dex e lo aggiungiamo all'Info
+            # con set_perp_meta(meta, offset) dove offset = len(perp standard)
             import eth_account
             from hyperliquid.exchange import Exchange
+            from hyperliquid.info import Info
 
-            wallet       = eth_account.Account.from_key(self.private_key)
-            exchange_xyz = Exchange(
+            wallet   = eth_account.Account.from_key(self.private_key)
+            info     = Info(self.API_URL, skip_ws=True)
+
+            # Meta perp standard (già caricato in info.__init__)
+            perp_meta = info.meta()
+            offset    = len(perp_meta.get('universe', []))
+
+            # Meta dex xyz
+            xyz_meta = info.post('/info', {'type': 'meta', 'dex': dex})
+
+            # Registra il meta xyz con offset per non sovrascrivere i perp
+            info.set_perp_meta(xyz_meta, offset)
+
+            # Ora name_to_asset('xyz:GOLD') funziona — il nome interno ha prefisso dex:
+            internal_name = f"{dex}:{coin.upper()}"
+
+            exchange = Exchange(
                 wallet,
                 self.API_URL,
+                meta=perp_meta,
                 account_address=self.account_address,
                 vault_address=None,
-                perp_dexs=[dex],
             )
-            return exchange_xyz.update_leverage(leverage, coin, is_cross)
+            # Sostituiamo info con quello arricchito
+            exchange.info = info
+
+            return exchange.update_leverage(leverage, internal_name, is_cross)
         else:
             # Perp standard — usa Exchange SDK
             exchange = self._get_exchange()
