@@ -246,10 +246,17 @@ class HyperliquidClient:
 
             nonce = int(time.time() * 1000)
 
-            # sign_l1_action ha firme diverse nelle varie versioni SDK
-            # Proviamo con dex, poi senza
-            sig_params = _inspect.signature(sign_l1_action).parameters
-            if 'dex' in sig_params:
+            # Firma adattiva: supporta versioni diverse dell'SDK
+            sig_params = list(_inspect.signature(sign_l1_action).parameters.keys())
+            logger.debug(f"sign_l1_action params: {sig_params}")
+            if 'expires_after' in sig_params:
+                # Versione nuova: sign_l1_action(wallet, action, vault, nonce, expires_after, is_mainnet, dex=)
+                expires_after = nonce + 1000 * 60 * 60  # 1 ora
+                if 'dex' in sig_params:
+                    signature = sign_l1_action(wallet, action, ZERO_ADDRESS, nonce, expires_after, True, dex=dex)
+                else:
+                    signature = sign_l1_action(wallet, action, ZERO_ADDRESS, nonce, expires_after, True)
+            elif 'dex' in sig_params:
                 signature = sign_l1_action(wallet, action, ZERO_ADDRESS, nonce, dex=dex)
             else:
                 signature = sign_l1_action(wallet, action, ZERO_ADDRESS, nonce)
