@@ -842,12 +842,13 @@ async def setleverage(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 2:
         await update.message.reply_text(
             "📐 *Set Leverage*\n\n"
-            "Uso: /setleverage SIMBOLO LEVA [cross]\n\n"
+            "Uso: /setleverage SIMBOLO LEVA [xyz] [cross]\n\n"
             "Esempi:\n"
-            "  /setleverage NFLX 5       — NFLX xyz, isolated, 5x\n"
-            "  /setleverage BTC 10       — BTC perp, isolated, 10x\n"
-            "  /setleverage MSTR 3 cross — MSTR xyz, cross, 3x\n\n"
-            "Default: isolated. Aggiungi 'cross' per cross margin.",
+            "  /setleverage NFLX 5           — auto-rileva mercato\n"
+            "  /setleverage SILVER 5 xyz     — forza xyz\n"
+            "  /setleverage BTC 10           — PERP standard\n"
+            "  /setleverage MSTR 3 xyz cross — xyz cross margin\n\n"
+            "Il mercato viene auto-rilevato. Aggiungi 'xyz' se fallisce.",
             parse_mode='Markdown'
         )
         return
@@ -870,28 +871,35 @@ async def setleverage(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Leva non valida (1-100).")
         return
 
-    is_cross = len(context.args) > 2 and context.args[2].lower() == 'cross'
-    margin_s = "cross" if is_cross else "isolated"
+    # Parsing argomenti extra: [xyz] [cross] in qualsiasi ordine
+    extra_args = [a.lower() for a in context.args[2:]]
+    is_cross   = 'cross' in extra_args
+    force_xyz  = 'xyz' in extra_args
+    margin_s   = "cross" if is_cross else "isolated"
 
-    # Determina se è un simbolo xyz interrogando direttamente il meta del dex
-    # (più affidabile della lista locale che potrebbe avere formati diversi)
+    # Determina se è un simbolo xyz:
+    # 1. Se l'utente ha passato 'xyz' esplicitamente → forza xyz
+    # 2. Altrimenti interroga il meta API del dex xyz
     import aiohttp as _aiohttp
-    dex      = ''
-    market_s = 'PERP'
-    try:
-        async with _aiohttp.ClientSession() as _sess:
-            async with _sess.post(
-                'https://api.hyperliquid.xyz/info',
-                json={'type': 'meta', 'dex': 'xyz'},
-                timeout=_aiohttp.ClientTimeout(total=10)
-            ) as _r:
-                _meta = await _r.json()
-        _xyz_names = {a.get('name', '').upper() for a in _meta.get('universe', [])}
-        if symbol.upper() in _xyz_names:
-            dex      = 'xyz'
-            market_s = 'XYZ'
-    except Exception as _e:
-        logger.warning(f"setleverage: impossibile determinare mercato per {symbol}: {_e}")
+    dex      = 'xyz' if force_xyz else ''
+    market_s = 'XYZ' if force_xyz else 'PERP'
+
+    if not force_xyz:
+        try:
+            async with _aiohttp.ClientSession() as _sess:
+                async with _sess.post(
+                    'https://api.hyperliquid.xyz/info',
+                    json={'type': 'meta', 'dex': 'xyz'},
+                    timeout=_aiohttp.ClientTimeout(total=10)
+                ) as _r:
+                    _meta = await _r.json()
+            _xyz_names = {a.get('name', '').upper() for a in _meta.get('universe', [])}
+            logger.debug(f"setleverage xyz universe: {_xyz_names}")
+            if symbol.upper() in _xyz_names:
+                dex      = 'xyz'
+                market_s = 'XYZ'
+        except Exception as _e:
+            logger.warning(f"setleverage: impossibile determinare mercato per {symbol}: {_e}")
 
     await update.message.reply_text(f"⏳ Imposto leva {leverage}x {margin_s} su {symbol} ({market_s})...")
 
