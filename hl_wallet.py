@@ -199,6 +199,51 @@ class HyperliquidClient:
 
         return positions
 
+    def set_leverage(self, coin: str, leverage: int, is_cross: bool = False, dex: str = '') -> dict:
+        """
+        Imposta la leva su un simbolo.
+        dex='' per perp standard, dex='xyz' per xyz.
+        is_cross=False → isolated (default Hyperliquid)
+        Richiede private key.
+        """
+        exchange = self._get_exchange()
+
+        if dex:
+            # Per xyz usa l'API diretta — l'SDK non supporta dex diversi
+            import eth_account
+            import json, time, requests
+            from eth_account.messages import encode_defunct
+
+            action = {
+                "type": "updateLeverage",
+                "asset": coin,
+                "isCross": is_cross,
+                "leverage": leverage,
+            }
+            if dex:
+                action["dex"] = dex
+
+            nonce     = int(time.time() * 1000)
+            wallet    = eth_account.Account.from_key(self.private_key)
+            msg_hash  = encode_defunct(text=json.dumps(action, separators=(',', ':')))
+            signature = wallet.sign_message(msg_hash)
+            sig_str   = signature.signature.hex()
+
+            payload = {
+                "action":    action,
+                "nonce":     nonce,
+                "signature": {"r": "0x" + sig_str[2:66],
+                              "s": "0x" + sig_str[66:130],
+                              "v": int(sig_str[130:], 16)},
+                "vaultAddress": None,
+            }
+            resp = requests.post(f"{self.API_URL}/exchange", json=payload, timeout=10)
+            return resp.json()
+        else:
+            # Perp standard — usa SDK
+            result = exchange.update_leverage(leverage, coin, is_cross)
+            return result
+
     def get_account_summary(self) -> dict:
         """
         Restituisce il riepilogo del conto: equity, margin, ecc.

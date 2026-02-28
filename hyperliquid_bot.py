@@ -325,6 +325,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/walletinfo       — stato credenziali\n"
         "/positions        — posizioni aperte su Hyperliquid\n"
         "/trackpositions   — attiva/disattiva tracking automatico posizioni\n"
+        "/setleverage SYM LEV [cross] — imposta leva su un simbolo\n"
         "/stats — statistiche bot\n"
         "/help — questo messaggio\n"
     )
@@ -793,6 +794,91 @@ async def trackpositions(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------------------------------------------------------------
+# Comando setleverage
+# ---------------------------------------------------------------------------
+
+async def setleverage(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /setleverage SYMBOL LEVERAGE [cross]
+    Es: /setleverage NFLX 5
+        /setleverage BTC 10
+        /setleverage MSTR 3 cross
+
+    Funziona su perp standard e xyz. Default: isolated.
+    Richiede /setaddress e /setkey.
+    """
+    chat_id = update.effective_chat.id
+    if not _is_wallet_allowed(chat_id):
+        await update.message.reply_text("❌ Non autorizzato.")
+        return
+
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "📐 *Set Leverage*\n\n"
+            "Uso: /setleverage SIMBOLO LEVA [cross]\n\n"
+            "Esempi:\n"
+            "  /setleverage NFLX 5       — NFLX xyz, isolated, 5x\n"
+            "  /setleverage BTC 10       — BTC perp, isolated, 10x\n"
+            "  /setleverage MSTR 3 cross — MSTR xyz, cross, 3x\n\n"
+            "Default: isolated. Aggiungi 'cross' per cross margin.",
+            parse_mode='Markdown'
+        )
+        return
+
+    addr = wallet_store.get_address(chat_id)
+    key  = wallet_store.get_key(chat_id)
+    if not addr:
+        await update.message.reply_text("❌ Imposta prima /setaddress")
+        return
+    if not key:
+        await update.message.reply_text("❌ Imposta prima /setkey per usare comandi di trading.")
+        return
+
+    symbol   = context.args[0].upper().replace('(XYZ)', '').strip()
+    try:
+        leverage = int(context.args[1])
+        if leverage < 1 or leverage > 100:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("❌ Leva non valida (1-100).")
+        return
+
+    is_cross = len(context.args) > 2 and context.args[2].lower() == 'cross'
+    margin_s = "cross" if is_cross else "isolated"
+
+    # Determina se è un simbolo xyz o perp standard
+    all_syms  = await monitor.get_all_symbols()
+    xyz_syms  = all_syms.get('dex_perps', {}).get('xyz', [])
+    is_xyz    = symbol in xyz_syms
+    dex       = 'xyz' if is_xyz else ''
+    market_s  = "XYZ" if is_xyz else "PERP"
+
+    await update.message.reply_text(f"⏳ Imposto leva {leverage}x {margin_s} su {symbol} ({market_s})...")
+
+    try:
+        client = HyperliquidClient(addr, private_key=key)
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: client.set_leverage(symbol, leverage, is_cross, dex)
+        )
+        logger.info(f"setleverage {symbol} {leverage}x {margin_s} ({market_s}) -> {result}")
+
+        # Controlla se l'SDK ha restituito un errore
+        if isinstance(result, dict) and result.get('status') == 'err':
+            await update.message.reply_text(f"❌ Errore: {result.get('response', result)}")
+        else:
+            await update.message.reply_text(
+                f"✅ *Leva aggiornata*\n\n"
+                f"Simbolo: *{symbol}* ({market_s})\n"
+                f"Leva: *{leverage}x*\n"
+                f"Margine: *{margin_s}*",
+                parse_mode='Markdown'
+            )
+    except Exception as e:
+        logger.error(f"Errore setleverage {symbol} chat {chat_id}: {e}")
+        await update.message.reply_text(f"❌ Errore: {e}")
+
+
+# ---------------------------------------------------------------------------
 # Comandi wallet / API Hyperliquid
 # ---------------------------------------------------------------------------
 
@@ -955,20 +1041,23 @@ async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg    = f"📊 *Posizioni aperte* — {now}\n"
     msg   += f"Equity: ${summary['account_value']:,.2f}  Margin: ${summary['total_margin']:,.2f}\n"
     msg   += "─" * 30 + "\n"
-    fmt_px = lambda x: f"{x:,.5g}"
+    def fmt_px(x):
+        if x == 0: return "0"
+        if x >= 100: return f"{x:,.2f}"
+        if x >= 1:   return f"{x:,.3f}"
+        return f"{x:,.5f}"
 
     for p in pos_list:
         arrow    = "📈 LONG" if p['is_long'] else "📉 SHORT"
-        pnl_sign = "+" if p['unrealized'] >= 0 else ""
-        pnl_col  = p['unrealized']
-        pnl_pct  = pnl_col / p['margin'] * 100 if p['margin'] else 0
         dex_tag  = f" _{p['dex']}_" if p.get('dex', 'PERP') != 'PERP' else ""
+        pnl_col  = p['unrealized']
+        pnl_sign = "+" if pnl_col >= 0 else ""
+        pnl_pct  = pnl_col / p['margin'] * 100 if p['margin'] else 0
 
         msg += (
-            f"\n{arrow} *{p['coin']}*{dex_tag} {p['leverage']}x\n"
-            f"  Size: {abs(p['size'])}  Entry: {fmt_px(p['entry_px'])}\n"
+            f"\n{arrow} *{p['coin']}*{dex_tag} {p['leverage']}x  size: {abs(p['size'])}\n"
+            f"  Entry: {fmt_px(p['entry_px'])}  Liq: {fmt_px(p['liq_px'])}\n"
             f"  PnL: {pnl_sign}${pnl_col:.2f} ({pnl_sign}{pnl_pct:.1f}%)\n"
-            f"  Liq: {fmt_px(p['liq_px'])}\n"
         )
 
     await update.message.reply_text(msg, parse_mode='Markdown')
@@ -1313,6 +1402,7 @@ def main():
     app.add_handler(CommandHandler("walletinfo",  walletinfo))
     app.add_handler(CommandHandler("positions",      positions))
     app.add_handler(CommandHandler("trackpositions", trackpositions))
+    app.add_handler(CommandHandler("setleverage",    setleverage))
 
     app.post_init     = post_init
     app.post_shutdown = post_shutdown
