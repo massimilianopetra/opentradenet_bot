@@ -207,36 +207,56 @@ class HyperliquidClient:
         Richiede private key.
         """
         if dex:
-            # Per xyz: istanzia un Exchange con il meta del dex specifico
-            # così l'SDK trova l'asset index corretto per SILVER, ORCL ecc.
+            # Per xyz l'SDK non supporta dex alternativi — usiamo REST + firma EIP-712
+            # tramite le utility di firma dell'SDK stesso
             import eth_account
-            from hyperliquid.exchange import Exchange
-            from hyperliquid.info import Info
+            import requests
+            import time
+            from hyperliquid.utils.signing import sign_l1_action, ZERO_ADDRESS
 
-            wallet   = eth_account.Account.from_key(self.private_key)
-            info_xyz = Info(self.API_URL, skip_ws=True)
+            wallet = eth_account.Account.from_key(self.private_key)
 
-            # Recupera meta del dex (contiene universe con asset index)
-            meta_ctxs = info_xyz.meta_and_asset_ctxs_by_dex(dex)
-            meta      = meta_ctxs[0] if meta_ctxs else None
-
-            exchange_xyz = Exchange(
-                wallet,
-                self.API_URL,
-                account_address=self.account_address,
-                vault_address=None,
+            # Recupera l'asset index del coin nel dex xyz
+            meta_resp = requests.post(
+                f'{self.API_URL}/info',
+                json={'type': 'meta', 'dex': dex},
+                timeout=10
             )
-            # Override del meta con quello del dex xyz
-            if meta:
-                exchange_xyz.meta = meta
+            meta = meta_resp.json()
+            universe = meta.get('universe', [])
+            asset_idx = None
+            for i, asset in enumerate(universe):
+                name = asset.get('name', '')
+                if name.upper() == coin.upper():
+                    asset_idx = i
+                    break
 
-            result = exchange_xyz.update_leverage(leverage, coin, is_cross)
-            return result
+            if asset_idx is None:
+                raise ValueError(f"Simbolo '{coin}' non trovato nel dex '{dex}'. "
+                                 f"Disponibili: {[a.get('name') for a in universe]}")
+
+            action = {
+                'type':      'updateLeverage',
+                'asset':     asset_idx,
+                'isCross':   is_cross,
+                'leverage':  leverage,
+            }
+
+            nonce     = int(time.time() * 1000)
+            signature = sign_l1_action(wallet, action, ZERO_ADDRESS, nonce, dex=dex)
+
+            payload = {
+                'action':       action,
+                'nonce':        nonce,
+                'signature':    signature,
+                'vaultAddress': None,
+            }
+            resp = requests.post(f'{self.API_URL}/exchange', json=payload, timeout=10)
+            return resp.json()
         else:
-            # Perp standard — usa Exchange normale
+            # Perp standard — usa Exchange SDK
             exchange = self._get_exchange()
-            result   = exchange.update_leverage(leverage, coin, is_cross)
-            return result
+            return exchange.update_leverage(leverage, coin, is_cross)
 
     def get_account_summary(self) -> dict:
         """
