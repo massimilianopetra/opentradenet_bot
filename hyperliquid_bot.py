@@ -628,27 +628,54 @@ async def list_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text(msg.strip(), parse_mode='Markdown')
 
 async def symbols_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /symbols          — lista tutti i simboli
+    /symbols QUERY    — cerca simboli che contengono QUERY (es. /symbols sil)
+    """
+    query    = context.args[0].upper() if context.args else ''
     await update.message.reply_text("🔍 Recupero simboli...")
-    all_syms = await monitor.get_all_symbols()
+    all_syms  = await monitor.get_all_symbols()
 
     perps     = all_syms.get('perps', [])
     spots     = all_syms.get('spot', [])
     dex_perps = all_syms.get('dex_perps', {})
 
+    # Se c'è una query, filtra e mostra solo i match
+    if query:
+        matches = []
+        for s in perps:
+            if query in s.upper():
+                matches.append(f"⚡ {s} (PERP)")
+        for dex_code, dex_syms in dex_perps.items():
+            for s in dex_syms:
+                if query in s.upper():
+                    matches.append(f"🔥 {s} ({dex_code.upper()})")
+        for s in spots:
+            clean = s.replace('/USDC', '')
+            if query in clean.upper():
+                matches.append(f"💎 {clean} (SPOT)")
+        if matches:
+            msg = f"🔍 *Risultati per '{query}'*:\n\n" + "\n".join(matches)
+        else:
+            msg = f"❌ Nessun simbolo trovato per '{query}'"
+        await update.message.reply_text(msg, parse_mode='Markdown')
+        return
+
+    # Lista completa con troncamento
     msg = "📊 *Simboli disponibili*\n\n"
 
     if perps:
         msg += f"⚡ *PERPETUALS* ({len(perps)} totali):\n"
         msg += ", ".join(perps[:MAX_SYMBOLS_DISPLAY])
         if len(perps) > MAX_SYMBOLS_DISPLAY:
-            msg += f"\n... e altri {len(perps) - MAX_SYMBOLS_DISPLAY}"
+            msg += f"\n... e altri {len(perps) - MAX_SYMBOLS_DISPLAY}  (usa /symbols QUERY per cercare)"
         msg += "\n\n"
 
     for dex_code, dex_syms in dex_perps.items():
-        msg += f"🔥 *{dex_code}* ({len(dex_syms)} totali):\n"
+        msg += f"🔥 *{dex_code.upper()}* ({len(dex_syms)} totali):\n"
         msg += ", ".join(dex_syms[:MAX_SYMBOLS_DISPLAY])
         if len(dex_syms) > MAX_SYMBOLS_DISPLAY:
-            msg += f"\n... e altri {len(dex_syms) - MAX_SYMBOLS_DISPLAY}"
+            msg += f"\n... e altri {len(dex_syms) - MAX_SYMBOLS_DISPLAY}  (usa /symbols QUERY per cercare)"
         msg += "\n\n"
 
     if spots:
@@ -660,7 +687,7 @@ async def symbols_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += "\n\n"
 
     total = len(perps) + len(spots) + sum(len(v) for v in dex_perps.values())
-    msg += f"*Totale: {total} simboli*"
+    msg += f"*Totale: {total} simboli*\nUsa /symbols QUERY per cercare, es: /symbols sil"
     await update.message.reply_text(msg, parse_mode='Markdown')
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -846,12 +873,25 @@ async def setleverage(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_cross = len(context.args) > 2 and context.args[2].lower() == 'cross'
     margin_s = "cross" if is_cross else "isolated"
 
-    # Determina se è un simbolo xyz o perp standard
-    all_syms  = await monitor.get_all_symbols()
-    xyz_syms  = all_syms.get('dex_perps', {}).get('xyz', [])
-    is_xyz    = symbol in xyz_syms
-    dex       = 'xyz' if is_xyz else ''
-    market_s  = "XYZ" if is_xyz else "PERP"
+    # Determina se è un simbolo xyz interrogando direttamente il meta del dex
+    # (più affidabile della lista locale che potrebbe avere formati diversi)
+    import aiohttp as _aiohttp
+    dex      = ''
+    market_s = 'PERP'
+    try:
+        async with _aiohttp.ClientSession() as _sess:
+            async with _sess.post(
+                'https://api.hyperliquid.xyz/info',
+                json={'type': 'meta', 'dex': 'xyz'},
+                timeout=_aiohttp.ClientTimeout(total=10)
+            ) as _r:
+                _meta = await _r.json()
+        _xyz_names = {a.get('name', '').upper() for a in _meta.get('universe', [])}
+        if symbol.upper() in _xyz_names:
+            dex      = 'xyz'
+            market_s = 'XYZ'
+    except Exception as _e:
+        logger.warning(f"setleverage: impossibile determinare mercato per {symbol}: {_e}")
 
     await update.message.reply_text(f"⏳ Imposto leva {leverage}x {margin_s} su {symbol} ({market_s})...")
 
