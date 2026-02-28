@@ -147,6 +147,8 @@ class HyperliquidPriceMonitor:
         self.last_snapshot_date: Optional[date]       = None   # data dell'ultimo snapshot giornaliero scritto
         # Position tracking: {chat_id: {coin: {entry_px, is_long, size, margin, leverage, dex, alert_base, added_at}}}
         self.position_tracks:   Dict[int, Dict[str, dict]] = {}
+        # Ordini in attesa di conferma: {chat_id: {action, coin, dex, is_buy, usd, expires_at}}
+        self.pending_orders:    Dict[int, dict]             = {}
         # chat_id con tracking attivo (default: tutti quelli con address configurato)
         self.tracking_enabled:  Set[int]                   = set()
         self.session: Optional[aiohttp.ClientSession] = None
@@ -326,6 +328,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/positions        — posizioni aperte su Hyperliquid\n"
         "/trackpositions   — attiva/disattiva tracking automatico posizioni\n"
         "/setleverage SYM LEV [cross] — imposta leva su un simbolo\n"
+        "/long SYM IMPORTO          — apre long per $IMPORTO\n"
+        "/short SYM IMPORTO         — apre short per $IMPORTO\n"
+        "/close SYM [%|importo]     — chiude posizione (tutto/parziale)\n"
+        "/confirm                   — conferma ordine pendente\n"
+        "/cancelorder               — annulla ordine pendente\n"
         "/stats — statistiche bot\n"
         "/help — questo messaggio\n"
     )
@@ -818,6 +825,322 @@ async def trackpositions(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"/trackpositions on/off",
         parse_mode='Markdown'
     )
+
+
+# ---------------------------------------------------------------------------
+# Helper ordini
+# ---------------------------------------------------------------------------
+
+async def _detect_dex(symbol: str) -> str:
+    """Ritorna 'xyz' se il simbolo è sul dex xyz, '' altrimenti."""
+    import aiohttp as _aiohttp
+    try:
+        async with _aiohttp.ClientSession() as sess:
+            async with sess.post(
+                'https://api.hyperliquid.xyz/info',
+                json={'type': 'meta', 'dex': 'xyz'},
+                timeout=_aiohttp.ClientTimeout(total=8)
+            ) as r:
+                meta = await r.json()
+        names = {a.get('name','').upper().replace('XYZ:','').replace('XYZ:','')
+                 for a in meta.get('universe',[])}
+        return 'xyz' if symbol.upper() in names else ''
+    except Exception:
+        return ''
+
+def _fmt(x):
+    if x == 0: return "0"
+    if x >= 1000: return f"{x:,.2f}"
+    if x >= 1:    return f"{x:,.3f}"
+    return f"{x:,.5f}"
+
+
+# ---------------------------------------------------------------------------
+# Comandi long / short / close / confirm / cancelorder
+# ---------------------------------------------------------------------------
+
+async def _order_precheck(update, chat_id):
+    """Controlli comuni: autorizzazione, address, key."""
+    if not _is_wallet_allowed(chat_id):
+        await update.message.reply_text("❌ Non autorizzato.")
+        return False
+    if not wallet_store.get_address(chat_id):
+        await update.message.reply_text("❌ Imposta prima /setaddress")
+        return False
+    if not wallet_store.get_key(chat_id):
+        await update.message.reply_text("❌ Imposta prima /setkey")
+        return False
+    return True
+
+
+async def long_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /long SIMBOLO IMPORTO_USD
+    Es: /long GOLD 500   → apre long GOLD per $500
+    """
+    chat_id = update.effective_chat.id
+    if not await _order_precheck(update, chat_id): return
+
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "📈 *Long*\n\nUso: /long SIMBOLO IMPORTO\n"
+            "Es: /long GOLD 500\n"
+            "Es: /long BTC 1000",
+            parse_mode='Markdown')
+        return
+
+    symbol = context.args[0].upper()
+    try:
+        usd = float(context.args[1].replace(',', '.'))
+        if usd <= 0: raise ValueError
+    except ValueError:
+        await update.message.reply_text("❌ Importo non valido.")
+        return
+
+    await _prepare_order(update, chat_id, symbol, usd, is_buy=True)
+
+
+async def short_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /short SIMBOLO IMPORTO_USD
+    Es: /short NFLX 300  → apre short NFLX per $300
+    """
+    chat_id = update.effective_chat.id
+    if not await _order_precheck(update, chat_id): return
+
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "📉 *Short*\n\nUso: /short SIMBOLO IMPORTO\n"
+            "Es: /short NFLX 300\n"
+            "Es: /short GOLD 500",
+            parse_mode='Markdown')
+        return
+
+    symbol = context.args[0].upper()
+    try:
+        usd = float(context.args[1].replace(',', '.'))
+        if usd <= 0: raise ValueError
+    except ValueError:
+        await update.message.reply_text("❌ Importo non valido.")
+        return
+
+    await _prepare_order(update, chat_id, symbol, usd, is_buy=False)
+
+
+async def _prepare_order(update, chat_id, symbol, usd, is_buy):
+    """Mostra riepilogo e chiede conferma."""
+    await update.message.reply_text("⏳ Recupero prezzo...")
+
+    addr = wallet_store.get_address(chat_id)
+    key  = wallet_store.get_key(chat_id)
+    dex  = await _detect_dex(symbol)
+
+    try:
+        client = HyperliquidClient(addr, private_key=key)
+        price  = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: client.get_current_price(symbol, dex)
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Errore prezzo: {e}")
+        return
+
+    size         = usd / price
+    market_s     = f"_{dex.upper()}_" if dex else "PERP"
+    direction    = "📈 LONG" if is_buy else "📉 SHORT"
+    expires_at   = datetime.now().timestamp() + 30
+
+    # Salva ordine pendente
+    monitor.pending_orders[chat_id] = {
+        'symbol':   symbol,
+        'dex':      dex,
+        'is_buy':   is_buy,
+        'usd':      usd,
+        'price':    price,
+        'size':     size,
+        'expires_at': expires_at,
+    }
+
+    await update.message.reply_text(
+        f"⚠️ *Conferma ordine*\n\n"
+        f"{direction} *{symbol}* {market_s}\n"
+        f"Importo: ${usd:,.2f}\n"
+        f"Prezzo attuale: ${_fmt(price)}\n"
+        f"Size stimata: {size:.4f}\n\n"
+        f"Invia /confirm per eseguire\n"
+        f"Invia /cancelorder per annullare\n"
+        f"⏰ Scade in 30 secondi",
+        parse_mode='Markdown'
+    )
+
+
+async def close_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /close SIMBOLO          → chiude tutta la posizione
+    /close SIMBOLO 50%      → chiude il 50%
+    /close SIMBOLO 200      → chiude $200 di posizione
+    """
+    chat_id = update.effective_chat.id
+    if not await _order_precheck(update, chat_id): return
+
+    if not context.args:
+        await update.message.reply_text(
+            "🔴 *Close*\n\nUso:\n"
+            "/close SIMBOLO          — chiude tutto\n"
+            "/close SIMBOLO 50%      — chiude il 50%\n"
+            "/close SIMBOLO 200      — chiude $200",
+            parse_mode='Markdown')
+        return
+
+    symbol     = context.args[0].upper()
+    usd_amount = None
+    pct        = None
+
+    if len(context.args) > 1:
+        arg = context.args[1]
+        if arg.endswith('%'):
+            try:
+                pct = float(arg[:-1]) / 100
+            except ValueError:
+                await update.message.reply_text("❌ Percentuale non valida.")
+                return
+        else:
+            try:
+                usd_amount = float(arg.replace(',', '.'))
+            except ValueError:
+                await update.message.reply_text("❌ Importo non valido.")
+                return
+
+    addr = wallet_store.get_address(chat_id)
+    key  = wallet_store.get_key(chat_id)
+    dex  = await _detect_dex(symbol)
+
+    # Trova posizione aperta
+    tracks = monitor.position_tracks.get(chat_id, {})
+    pos    = tracks.get(symbol)
+    if not pos:
+        # Prova a leggere live
+        try:
+            client   = HyperliquidClient(addr, private_key=key)
+            pos_list = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: client.get_positions(extra_dexs=SUPPORTED_DEXS)
+            )
+            pos = next((p for p in pos_list if p['coin'].upper() == symbol), None)
+        except Exception:
+            pass
+
+    size_info = ""
+    if pos:
+        total_size = abs(pos['size'] if isinstance(pos, dict) and 'size' in pos else pos.get('size', 0))
+        if pct is not None:
+            close_size = round(total_size * pct, 4)
+            size_info  = f"Size da chiudere: {close_size} ({pct*100:.0f}% di {total_size})"
+        elif usd_amount is not None:
+            price = pos.get('entry_px', 1)
+            close_size = round(usd_amount / price, 4)
+            size_info  = f"Size da chiudere: ~{close_size} (${usd_amount:.2f})"
+        else:
+            size_info  = f"Size da chiudere: {total_size} (tutto)"
+
+    market_s   = f"_{dex.upper()}_" if dex else "PERP"
+    expires_at = datetime.now().timestamp() + 30
+
+    monitor.pending_orders[chat_id] = {
+        'symbol':     symbol,
+        'dex':        dex,
+        'is_buy':     None,  # None = close
+        'usd':        usd_amount,
+        'pct':        pct,
+        'expires_at': expires_at,
+    }
+
+    await update.message.reply_text(
+        f"⚠️ *Conferma chiusura*\n\n"
+        f"🔴 CLOSE *{symbol}* {market_s}\n"
+        f"{size_info}\n\n"
+        f"Invia /confirm per eseguire\n"
+        f"Invia /cancelorder per annullare\n"
+        f"⏰ Scade in 30 secondi",
+        parse_mode='Markdown'
+    )
+
+
+async def confirm_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Conferma ed esegue l'ordine pendente."""
+    chat_id = update.effective_chat.id
+    order   = monitor.pending_orders.get(chat_id)
+
+    if not order:
+        await update.message.reply_text("❌ Nessun ordine in attesa. Usa /long, /short o /close.")
+        return
+
+    if datetime.now().timestamp() > order['expires_at']:
+        monitor.pending_orders.pop(chat_id, None)
+        await update.message.reply_text("⏰ Ordine scaduto. Ripeti il comando.")
+        return
+
+    monitor.pending_orders.pop(chat_id, None)
+    await update.message.reply_text("⏳ Esecuzione ordine...")
+
+    addr   = wallet_store.get_address(chat_id)
+    key    = wallet_store.get_key(chat_id)
+    symbol = order['symbol']
+    dex    = order['dex']
+    client = HyperliquidClient(addr, private_key=key)
+
+    try:
+        if order['is_buy'] is None:
+            # CLOSE
+            result = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: client.market_close(
+                    symbol, dex,
+                    usd_amount=order.get('usd'),
+                    pct=order.get('pct')
+                )
+            )
+            direction = "🔴 CLOSE"
+        else:
+            # LONG / SHORT
+            result = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: client.market_open(
+                    symbol, order['is_buy'], order['usd'], dex
+                )
+            )
+            direction = "📈 LONG" if order['is_buy'] else "📉 SHORT"
+
+        logger.info(f"ORDER {direction} {symbol} chat {chat_id}: {result}")
+
+        # Controlla errore
+        if isinstance(result, dict) and result.get('status') == 'err':
+            await update.message.reply_text(f"❌ Errore exchange: {result.get('response', result)}")
+            return
+
+        market_s = f"_{dex.upper()}_" if dex else "PERP"
+        size     = result.get('_size', '?')
+        price    = result.get('_price', '?')
+        usd      = result.get('_usd', order.get('usd', '?'))
+
+        await update.message.reply_text(
+            f"✅ *Ordine eseguito*\n\n"
+            f"{direction} *{symbol}* {market_s}\n"
+            f"Size: {size}\n"
+            f"Prezzo: ${_fmt(price) if isinstance(price, float) else price}\n"
+            f"Importo: ${usd:,.2f}\n"
+            f"⏰ {datetime.now().strftime('%H:%M:%S')}",
+            parse_mode='Markdown'
+        )
+
+    except Exception as e:
+        logger.error(f"Errore esecuzione ordine {symbol} chat {chat_id}: {e}")
+        await update.message.reply_text(f"❌ Errore: {e}")
+
+
+async def cancelorder_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Annulla l'ordine pendente."""
+    chat_id = update.effective_chat.id
+    if monitor.pending_orders.pop(chat_id, None):
+        await update.message.reply_text("🚫 Ordine annullato.")
+    else:
+        await update.message.reply_text("ℹ️ Nessun ordine in attesa.")
 
 
 # ---------------------------------------------------------------------------
@@ -1451,6 +1774,11 @@ def main():
     app.add_handler(CommandHandler("positions",      positions))
     app.add_handler(CommandHandler("trackpositions", trackpositions))
     app.add_handler(CommandHandler("setleverage",    setleverage))
+    app.add_handler(CommandHandler("long",           long_command))
+    app.add_handler(CommandHandler("short",          short_command))
+    app.add_handler(CommandHandler("close",          close_command))
+    app.add_handler(CommandHandler("confirm",        confirm_command))
+    app.add_handler(CommandHandler("cancelorder",    cancelorder_command))
 
     app.post_init     = post_init
     app.post_shutdown = post_shutdown

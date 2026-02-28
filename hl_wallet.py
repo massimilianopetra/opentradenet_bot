@@ -233,6 +233,110 @@ class HyperliquidClient:
             exchange = self._get_exchange()
             return exchange.update_leverage(leverage, coin, is_cross)
 
+    def _get_exchange_xyz(self, dex: str):
+        """Exchange configurato per un dex xyz."""
+        import eth_account
+        from hyperliquid.exchange import Exchange
+        from hyperliquid.info import Info
+        wallet   = eth_account.Account.from_key(self.private_key)
+        info     = Info(self.API_URL, skip_ws=True, perp_dexs=[dex])
+        exchange = Exchange(wallet, self.API_URL,
+                            account_address=self.account_address,
+                            vault_address=None)
+        exchange.info = info
+        return exchange
+
+    def get_current_price(self, coin: str, dex: str = '') -> float:
+        """Prezzo corrente mid del simbolo."""
+        import requests
+        resp = requests.post(f'{self.API_URL}/info',
+                             json={'type': 'allMids', 'dex': dex}, timeout=10)
+        mids = resp.json()
+        internal = f"{dex}:{coin.upper()}" if dex else coin.upper()
+        val = mids.get(internal) or mids.get(coin.upper())
+        if val is None:
+            raise ValueError(f"Prezzo non trovato per '{coin}' (dex='{dex}')")
+        return float(val)
+
+    def market_open(self, coin: str, is_buy: bool, usd_amount: float,
+                    dex: str = '', slippage: float = 0.01) -> dict:
+        """
+        Apre una posizione long (is_buy=True) o short (is_buy=False).
+        usd_amount = valore nozionale in dollari (es. 500 → $500 di posizione).
+        size calcolata automaticamente: size = usd_amount / prezzo_corrente.
+        """
+        price    = self.get_current_price(coin, dex)
+        sz_dec   = self._get_sz_decimals(coin, dex)
+        size     = round(usd_amount / price, sz_dec)
+
+        if dex:
+            exchange = self._get_exchange_xyz(dex)
+            name     = f"{dex}:{coin.upper()}"
+        else:
+            exchange = self._get_exchange()
+            name     = coin.upper()
+
+        result = exchange.market_open(name, is_buy, size, slippage=slippage)
+        result['_price']  = price
+        result['_size']   = size
+        result['_usd']    = usd_amount
+        return result
+
+    def market_close(self, coin: str, dex: str = '',
+                     usd_amount: float = None, pct: float = None) -> dict:
+        """
+        Chiude una posizione aperta.
+        usd_amount: chiudi $N di posizione (None = tutto)
+        pct: chiudi X% della posizione (es. 0.5 = 50%)
+        Se entrambi None chiude tutto.
+        """
+        # Legge size attuale
+        pos_list = self.get_positions(extra_dexs=[dex] if dex else [])
+        coin_up  = coin.upper()
+        pos      = next((p for p in pos_list if p['coin'].upper() == coin_up), None)
+        if pos is None:
+            raise ValueError(f"Nessuna posizione aperta su {coin}")
+
+        total_size = abs(pos['size'])
+
+        if pct is not None:
+            close_size = round(total_size * pct, 6)
+        elif usd_amount is not None:
+            price      = self.get_current_price(coin, dex)
+            sz_dec     = self._get_sz_decimals(coin, dex)
+            close_size = round(usd_amount / price, sz_dec)
+            close_size = min(close_size, total_size)
+        else:
+            close_size = total_size
+
+        if dex:
+            exchange = self._get_exchange_xyz(dex)
+            name     = f"{dex}:{coin.upper()}"
+        else:
+            exchange = self._get_exchange()
+            name     = coin.upper()
+
+        result = exchange.market_close(name, close_size)
+        result['_size']  = close_size
+        result['_total'] = total_size
+        return result
+
+    def _get_sz_decimals(self, coin: str, dex: str = '') -> int:
+        """Numero di decimali per la size del simbolo."""
+        try:
+            import requests
+            resp = requests.post(f'{self.API_URL}/info',
+                                 json={'type': 'meta', 'dex': dex}, timeout=10)
+            universe = resp.json().get('universe', [])
+            prefix   = f"{dex}:" if dex else ""
+            for asset in universe:
+                name = asset.get('name', '').replace(prefix, '').replace('XYZ:', '')
+                if name.upper() == coin.upper():
+                    return asset.get('szDecimals', 4)
+        except Exception:
+            pass
+        return 4  # default safe
+
     def get_account_summary(self) -> dict:
         """
         Restituisce il riepilogo del conto: equity, margin, ecc.
