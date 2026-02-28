@@ -207,39 +207,58 @@ class HyperliquidClient:
         Richiede private key.
         """
         if dex:
-            # Per xyz: carichiamo il meta del dex e lo aggiungiamo all'Info
-            # con set_perp_meta(meta, offset) dove offset = len(perp standard)
+            # Per xyz l'asset index è locale al dex (0-based), non globale.
+            # Usiamo REST direttamente con la firma dell'SDK.
             import eth_account
-            from hyperliquid.exchange import Exchange
+            import requests
+            import time
             from hyperliquid.info import Info
+            from hyperliquid.utils.signing import sign_l1_action
+            from hyperliquid.utils.constants import MAINNET_API_URL
 
-            wallet   = eth_account.Account.from_key(self.private_key)
-            info     = Info(self.API_URL, skip_ws=True)
+            wallet = eth_account.Account.from_key(self.private_key)
+            info   = Info(self.API_URL, skip_ws=True)
 
-            # Meta perp standard (già caricato in info.__init__)
-            perp_meta = info.meta()
-            offset    = len(perp_meta.get('universe', []))
-
-            # Meta dex xyz
+            # Recupera meta xyz e trova l'indice locale del simbolo
             xyz_meta = info.post('/info', {'type': 'meta', 'dex': dex})
+            universe = xyz_meta.get('universe', [])
+            asset_idx = None
+            for i, asset in enumerate(universe):
+                name = asset.get('name', '').upper().replace(f'{dex.upper()}:', '').replace('XYZ:', '')
+                if name == coin.upper():
+                    asset_idx = i
+                    break
 
-            # Registra il meta xyz con offset per non sovrascrivere i perp
-            info.set_perp_meta(xyz_meta, offset)
+            if asset_idx is None:
+                available = [a.get('name') for a in universe]
+                raise ValueError(f"'{coin}' non trovato in {dex}. Disponibili: {available}")
 
-            # Ora name_to_asset('xyz:GOLD') funziona — il nome interno ha prefisso dex:
-            internal_name = f"{dex}:{coin.upper()}"
+            action = {
+                'type':     'updateLeverage',
+                'asset':    asset_idx,
+                'isCross':  is_cross,
+                'leverage': leverage,
+            }
 
-            exchange = Exchange(
-                wallet,
-                self.API_URL,
-                meta=perp_meta,
-                account_address=self.account_address,
-                vault_address=None,
+            nonce         = int(time.time() * 1000)
+            expires_after = nonce + 1000 * 60 * 60  # 1 ora
+            is_mainnet    = self.API_URL == MAINNET_API_URL
+
+            signature = sign_l1_action(
+                wallet, action,
+                '0x0000000000000000000000000000000000000000',
+                nonce, expires_after, is_mainnet
             )
-            # Sostituiamo info con quello arricchito
-            exchange.info = info
 
-            return exchange.update_leverage(leverage, internal_name, is_cross)
+            payload = {
+                'action':       action,
+                'nonce':        nonce,
+                'signature':    signature,
+                'vaultAddress': None,
+                'dex':          dex,
+            }
+            resp = requests.post(f'{self.API_URL}/exchange', json=payload, timeout=10)
+            return resp.json()
         else:
             # Perp standard — usa Exchange SDK
             exchange = self._get_exchange()
