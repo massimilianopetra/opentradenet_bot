@@ -893,7 +893,7 @@ async def setleverage(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     timeout=_aiohttp.ClientTimeout(total=10)
                 ) as _r:
                     _meta = await _r.json()
-            _xyz_names = {a.get('name', '').upper() for a in _meta.get('universe', [])}
+            _xyz_names = {a.get('name', '').upper().replace('XYZ:', '') for a in _meta.get('universe', [])}
             logger.debug(f"setleverage xyz universe: {_xyz_names}")
             if symbol.upper() in _xyz_names:
                 dex      = 'xyz'

@@ -227,7 +227,7 @@ class HyperliquidClient:
             asset_idx = None
             for i, asset in enumerate(universe):
                 name = asset.get('name', '')
-                if name.upper() == coin.upper():
+                if name.upper().replace('XYZ:', '') == coin.upper():
                     asset_idx = i
                     break
 
