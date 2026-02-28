@@ -212,8 +212,10 @@ class HyperliquidClient:
             import eth_account
             import requests
             import time
-            from hyperliquid.utils.signing import sign_l1_action, ZERO_ADDRESS
+            from hyperliquid.utils.signing import sign_l1_action
+            import inspect as _inspect
 
+            ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
             wallet = eth_account.Account.from_key(self.private_key)
 
             # Recupera l'asset index del coin nel dex xyz
@@ -242,8 +244,15 @@ class HyperliquidClient:
                 'leverage':  leverage,
             }
 
-            nonce     = int(time.time() * 1000)
-            signature = sign_l1_action(wallet, action, ZERO_ADDRESS, nonce, dex=dex)
+            nonce = int(time.time() * 1000)
+
+            # sign_l1_action ha firme diverse nelle varie versioni SDK
+            # Proviamo con dex, poi senza
+            sig_params = _inspect.signature(sign_l1_action).parameters
+            if 'dex' in sig_params:
+                signature = sign_l1_action(wallet, action, ZERO_ADDRESS, nonce, dex=dex)
+            else:
+                signature = sign_l1_action(wallet, action, ZERO_ADDRESS, nonce)
 
             payload = {
                 'action':       action,
