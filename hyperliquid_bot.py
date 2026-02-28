@@ -1116,15 +1116,20 @@ async def confirm_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         market_s = f"_{dex.upper()}_" if dex else "PERP"
         size     = result.get('_size', '?')
-        price    = result.get('_price', '?')
-        usd      = result.get('_usd', order.get('usd', '?'))
+        price    = result.get('_price')
+        usd      = result.get('_usd') or order.get('usd')
+
+        # Riga prezzo — solo se disponibile (non per close)
+        price_line = f"Prezzo: ${_fmt(price)}\n" if isinstance(price, float) else ""
+        # Riga importo — solo se disponibile
+        usd_line   = f"Importo: ${usd:,.2f}\n" if isinstance(usd, (int, float)) else ""
 
         await update.message.reply_text(
             f"✅ *Ordine eseguito*\n\n"
             f"{direction} *{symbol}* {market_s}\n"
             f"Size: {size}\n"
-            f"Prezzo: ${_fmt(price) if isinstance(price, float) else price}\n"
-            f"Importo: ${usd:,.2f}\n"
+            f"{price_line}"
+            f"{usd_line}"
             f"⏰ {datetime.now().strftime('%H:%M:%S')}",
             parse_mode='Markdown'
         )
