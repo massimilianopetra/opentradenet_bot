@@ -359,6 +359,10 @@ class HyperliquidPriceMonitor:
         result: Set[str] = set()
         for syms in self.subscribers.values():
             result.update(syms)
+        # Aggiunge i coin degli ordini condizionali (stoploss/takeprofit)
+        for conds in self.conditional_orders.values():
+            for o in conds.values():
+                result.add(o['coin'])
         return result
 
 
@@ -2116,105 +2120,111 @@ async def price_polling_task(application: Application):
                     if coin in monitor.position_tracks.get(chat_id, {}):
                         monitor.position_tracks[chat_id][coin]['alert_base'] = new_base
 
+            # (fine blocco if monitored)
+
             # --- ORDINI CONDIZIONALI: stoploss / takeprofit ---
-            now_ts = datetime.now().timestamp()
-            for cid, conds in list(monitor.conditional_orders.items()):
-                for oid, o in list(conds.items()):
-                    coin       = o['coin']
-                    price_info = all_prices.get(coin)
-                    if not price_info:
-                        continue
-                    current_px = price_info[0]
+            # Eseguito sempre, indipendentemente dai subscribe attivi
+            if monitor.conditional_orders:
+                if not all_prices:
+                    all_prices = await monitor.fetch_all_prices()
+                now_ts = datetime.now().timestamp()
+                for cid, conds in list(monitor.conditional_orders.items()):
+                    for oid, o in list(conds.items()):
+                        coin       = o['coin']
+                        price_info = all_prices.get(coin)
+                        if not price_info:
+                            continue
+                        current_px = price_info[0]
 
-                    # Verifica trigger
-                    triggered = (
-                        (o['type'] == 'stoploss'   and current_px <= o['trigger_px']) or
-                        (o['type'] == 'takeprofit' and current_px >= o['trigger_px'])
-                    )
+                        # Verifica trigger
+                        triggered = (
+                            (o['type'] == 'stoploss'   and current_px <= o['trigger_px']) or
+                            (o['type'] == 'takeprofit' and current_px >= o['trigger_px'])
+                        )
 
-                    if not triggered:
-                        # Se non è più in zona e c'era un messaggio attivo, puliscilo
-                        if o.get('alert_message_id'):
-                            try:
+                        if not triggered:
+                            # Se non è più in zona e c'era un messaggio attivo, puliscilo
+                            if o.get('alert_message_id'):
+                                try:
+                                    await application.bot.edit_message_text(
+                                        chat_id=cid,
+                                        message_id=o['alert_message_id'],
+                                        text=(
+                                            f"{'🛑 Stop Loss' if o['type'] == 'stoploss' else '🎯 Take Profit'}"
+                                            f" — `{oid}` ✅ uscito dalla zona\n"
+                                            f"Trigger: ${_fmt(o['trigger_px'])}  Attuale: ${_fmt(current_px)}"
+                                        ),
+                                        parse_mode='Markdown'
+                                    )
+                                except Exception:
+                                    pass
+                                o['alert_message_id'] = None
+                            continue
+
+                        # Silenziato dopo "Salta"?
+                        if o.get('snoozed_until') and now_ts < o['snoozed_until']:
+                            continue
+
+                        # Costruisce testo alert con PnL se posizione tracciata
+                        t_label  = "🛑 Stop Loss" if o['type'] == 'stoploss' else "🎯 Take Profit"
+                        arrow    = "🔽" if o['type'] == 'stoploss' else "🔼"
+                        dex_s    = f"_{o['dex'].upper()}_" if o['dex'] else "PERP"
+                        size_s   = ""
+                        if o.get('pct'):   size_s = f"  ({o['pct']*100:.0f}%)"
+                        elif o.get('usd'): size_s = f"  (${o['usd']:,.0f})"
+                        else:              size_s = "  (tutto)"
+
+                        # PnL dalla posizione tracciata se disponibile
+                        pnl_line = ""
+                        track = monitor.position_tracks.get(cid, {}).get(coin)
+                        if track:
+                            entry_px = track['entry_px']
+                            size_val = track['size']
+                            pnl_rt   = (current_px - entry_px) * size_val
+                            try:    lev_n = float(str(track.get('leverage',1)).replace('x',''))
+                            except: lev_n = 1
+                            margin_i = abs(entry_px * size_val / lev_n) if lev_n else 1
+                            pnl_pct  = pnl_rt / margin_i * 100 if margin_i else 0
+                            pnl_s    = "+" if pnl_rt >= 0 else ""
+                            pnl_line = f"\nPnL: {pnl_s}${pnl_rt:.2f} ({pnl_s}{pnl_pct:.1f}%)"
+
+                        now_str  = datetime.now().strftime('%H:%M:%S')
+                        txt = (
+                            f"{t_label} — `{oid}`  _{now_str}_\n\n"
+                            f"{arrow} *{coin}* {dex_s}\n"
+                            f"Trigger: ${_fmt(o['trigger_px'])}  Attuale: ${_fmt(current_px)}"
+                            f"{pnl_line}\n"
+                            f"Azione: chiudi posizione{size_s}"
+                        )
+                        keyboard = InlineKeyboardMarkup([[
+                            InlineKeyboardButton("✅ Esegui",  callback_data=f"cond_exec_{cid}_{oid}"),
+                            InlineKeyboardButton("⏭ Salta",   callback_data=f"cond_snooze_{cid}_{oid}"),
+                            InlineKeyboardButton("🗑 Cancella",callback_data=f"cond_cancel_{cid}_{oid}"),
+                        ]])
+
+                        try:
+                            mid = o.get('alert_message_id')
+                            if mid:
+                                # Aggiorna silenziosamente il messaggio esistente
                                 await application.bot.edit_message_text(
-                                    chat_id=cid,
-                                    message_id=o['alert_message_id'],
-                                    text=(
-                                        f"{'🛑 Stop Loss' if o['type'] == 'stoploss' else '🎯 Take Profit'}"
-                                        f" — `{oid}` ✅ uscito dalla zona\n"
-                                        f"Trigger: ${_fmt(o['trigger_px'])}  Attuale: ${_fmt(current_px)}"
-                                    ),
-                                    parse_mode='Markdown'
+                                    chat_id=cid, message_id=mid,
+                                    text=txt, parse_mode='Markdown',
+                                    reply_markup=keyboard
                                 )
-                            except Exception:
-                                pass
-                            o['alert_message_id'] = None
-                        continue
+                            else:
+                                # Prima volta: send con notifica (bip)
+                                sent = await application.bot.send_message(
+                                    chat_id=cid, text=txt,
+                                    parse_mode='Markdown', reply_markup=keyboard
+                                )
+                                o['alert_message_id'] = sent.message_id
+                                monitor.save_conditional_orders(cid)
+                        except Exception as e:
+                            if mid and 'message to edit not found' in str(e).lower():
+                                o['alert_message_id'] = None
+                            else:
+                                logger.error(f"Errore cond alert {oid} chat {cid}: {e}")
 
-                    # Silenziato dopo "Salta"?
-                    if o.get('snoozed_until') and now_ts < o['snoozed_until']:
-                        continue
-
-                    # Costruisce testo alert con PnL se posizione tracciata
-                    t_label  = "🛑 Stop Loss" if o['type'] == 'stoploss' else "🎯 Take Profit"
-                    arrow    = "🔽" if o['type'] == 'stoploss' else "🔼"
-                    dex_s    = f"_{o['dex'].upper()}_" if o['dex'] else "PERP"
-                    size_s   = ""
-                    if o.get('pct'):   size_s = f"  ({o['pct']*100:.0f}%)"
-                    elif o.get('usd'): size_s = f"  (${o['usd']:,.0f})"
-                    else:              size_s = "  (tutto)"
-
-                    # PnL dalla posizione tracciata se disponibile
-                    pnl_line = ""
-                    track = monitor.position_tracks.get(cid, {}).get(coin)
-                    if track:
-                        entry_px = track['entry_px']
-                        size_val = track['size']
-                        pnl_rt   = (current_px - entry_px) * size_val
-                        try:    lev_n = float(str(track.get('leverage',1)).replace('x',''))
-                        except: lev_n = 1
-                        margin_i = abs(entry_px * size_val / lev_n) if lev_n else 1
-                        pnl_pct  = pnl_rt / margin_i * 100 if margin_i else 0
-                        pnl_s    = "+" if pnl_rt >= 0 else ""
-                        pnl_line = f"\nPnL: {pnl_s}${pnl_rt:.2f} ({pnl_s}{pnl_pct:.1f}%)"
-
-                    now_str  = datetime.now().strftime('%H:%M:%S')
-                    txt = (
-                        f"{t_label} — `{oid}`  _{now_str}_\n\n"
-                        f"{arrow} *{coin}* {dex_s}\n"
-                        f"Trigger: ${_fmt(o['trigger_px'])}  Attuale: ${_fmt(current_px)}"
-                        f"{pnl_line}\n"
-                        f"Azione: chiudi posizione{size_s}"
-                    )
-                    keyboard = InlineKeyboardMarkup([[
-                        InlineKeyboardButton("✅ Esegui",          callback_data=f"cond_exec_{cid}_{oid}"),
-                        InlineKeyboardButton("⏭ Salta",            callback_data=f"cond_snooze_{cid}_{oid}"),
-                        InlineKeyboardButton("🗑 Cancella",         callback_data=f"cond_cancel_{cid}_{oid}"),
-                    ]])
-
-                    try:
-                        mid = o.get('alert_message_id')
-                        if mid:
-                            # Aggiorna silenziosamente il messaggio esistente
-                            await application.bot.edit_message_text(
-                                chat_id=cid, message_id=mid,
-                                text=txt, parse_mode='Markdown',
-                                reply_markup=keyboard
-                            )
-                        else:
-                            # Prima volta: send con notifica (bip)
-                            sent = await application.bot.send_message(
-                                chat_id=cid, text=txt,
-                                parse_mode='Markdown', reply_markup=keyboard
-                            )
-                            o['alert_message_id'] = sent.message_id
-                            monitor.save_conditional_orders(cid)
-                    except Exception as e:
-                        # Se edit fallisce (messaggio cancellato dall'utente) → manda nuovo
-                        if mid and 'message to edit not found' in str(e).lower():
-                            o['alert_message_id'] = None
-                        else:
-                            logger.error(f"Errore cond alert {oid} chat {cid}: {e}")
 
             # --- PRICESPIKE: confronto poll-to-poll su lista fissa ---
             if monitor.spike_subscribers:
