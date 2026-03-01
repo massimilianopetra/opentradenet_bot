@@ -925,7 +925,7 @@ async def fetch_candles_15m(symbol: str, dex: str = '') -> list:
 def save_candles(symbol: str, candles: list) -> int:
     """
     Salva le candele in data/candles/SIMBOLO/SIMBOLO_15m.csv
-    Salta righe con timestamp già presenti (deduplicazione).
+    Deduplicazione + merge ordinato cronologicamente (no append cieco).
     Ritorna il numero di righe nuove scritte.
     """
     if not candles:
@@ -935,8 +935,9 @@ def save_candles(symbol: str, candles: list) -> int:
     sym_dir.mkdir(parents=True, exist_ok=True)
     csv_path = sym_dir / f"{symbol}_15m.csv"
 
-    # Carica timestamp già presenti per deduplicazione
-    existing = set()
+    # Legge righe esistenti
+    existing_rows = []
+    existing_ts   = set()
     if csv_path.exists():
         try:
             with open(csv_path, 'r', encoding='utf-8') as f:
@@ -944,27 +945,37 @@ def save_candles(symbol: str, candles: list) -> int:
                 next(reader, None)  # salta header
                 for row in reader:
                     if row:
-                        existing.add(row[0])
+                        existing_rows.append(row)
+                        existing_ts.add(row[0])
         except Exception:
             pass
 
-    is_new  = not csv_path.exists()
-    written = 0
+    # Aggiunge solo le candele con timestamp nuovo
+    written   = 0
+    new_rows  = []
+    for c in candles:
+        if c['timestamp'] not in existing_ts:
+            new_rows.append([
+                c['timestamp'], c['open'], c['high'],
+                c['low'], c['close'], c['volume']
+            ])
+            existing_ts.add(c['timestamp'])
+            written += 1
+
+    if not written:
+        return 0
+
+    # Merge + ordinamento cronologico + riscrittura completa
+    all_rows = existing_rows + new_rows
+    all_rows.sort(key=lambda r: r[0])
     try:
-        with open(csv_path, 'a', newline='', encoding='utf-8') as f:
+        with open(csv_path, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
-            if is_new:
-                writer.writerow(['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            for c in candles:
-                if c['timestamp'] not in existing:
-                    writer.writerow([
-                        c['timestamp'], c['open'], c['high'],
-                        c['low'], c['close'], c['volume']
-                    ])
-                    existing.add(c['timestamp'])
-                    written += 1
+            writer.writerow(['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            writer.writerows(all_rows)
     except Exception as e:
         logger.error(f"Errore scrittura candele {symbol}: {e}")
+        return 0
 
     return written
 
