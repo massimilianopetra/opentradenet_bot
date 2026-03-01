@@ -578,10 +578,15 @@ async def list_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE)
             entry         = track['entry_px']
             base          = track['alert_base']
             is_long       = track['is_long']
-            pnl           = track['unrealized']
-            pnl_s         = "+" if pnl >= 0 else ""
-            pnl_pct       = pnl / track['margin'] * 100 if track['margin'] else 0
             liq           = track['liq_px']
+            # PnL real-time e % su margine iniziale calcolato da entry
+            cp          = current_price or entry
+            pnl_rt      = (cp - entry) * track['size']
+            pnl_s       = "+" if pnl_rt >= 0 else ""
+            try:    _lev = float(str(track.get('leverage',1)).replace('x',''))
+            except: _lev = 1
+            _margin_i   = abs(entry * track['size'] / _lev) if _lev else track['margin'] or 1
+            pnl_pct     = pnl_rt / _margin_i * 100 if _margin_i else 0
             fmt           = lambda x: f"{x:,.5g}"
 
             arrow_dir = "📈" if is_long else "📉"
@@ -606,7 +611,7 @@ async def list_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE)
             msg += (
                 f"{arrow_dir} *{coin}* {dir_s} _{track['dex']}_ {track['leverage']}x\n"
                 f"  Entry: {fmt(entry)}  Ora: {fmt(current_price) if current_price else '—'}  Size: {abs(track['size'])}\n"
-                f"  PnL: {pnl_s}${pnl:.2f} ({pnl_s}{pnl_pct:.1f}%)\n"
+                f"  PnL: {pnl_s}${pnl_rt:.2f} ({pnl_s}{pnl_pct:.1f}%)\n"
                 f"{pct_str}"
                 f"  Liq: {fmt(liq)} (dist: {liq_dist:.1f}%)\n\n"
             )
@@ -1506,7 +1511,10 @@ async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
         dex_tag  = f" _{p['dex']}_" if p.get('dex', 'PERP') != 'PERP' else ""
         pnl_col  = p['unrealized']
         pnl_sign = "+" if pnl_col >= 0 else ""
-        pnl_pct  = pnl_col / p['margin'] * 100 if p['margin'] else 0
+        try:    _lev = float(str(p.get('leverage',1)).replace('x',''))
+        except: _lev = 1
+        _margin_i = abs(p['entry_px'] * p['size'] / _lev) if _lev else p['margin'] or 1
+        pnl_pct  = pnl_col / _margin_i * 100 if _margin_i else 0
 
         msg += (
             f"\n{arrow} *{p['coin']}*{dex_tag} {p['leverage']}x  size: {abs(p['size'])}\n"
@@ -1710,7 +1718,12 @@ async def price_polling_task(application: Application):
                             # PnL real-time: per long (current-entry)*size, per short (entry-current)*size
                             pnl_rt    = (current_price - entry_px) * size_val
                             pnl_rt_s  = "+" if pnl_rt >= 0 else ""
-                            pnl_pct   = pnl_rt / track['margin'] * 100 if track['margin'] else 0
+                            # Margine calcolato da entry (non dall'API che si aggiorna ogni 5min)
+                            lev_val   = track.get('leverage', 1)
+                            try:    lev_num = float(str(lev_val).replace('x',''))
+                            except: lev_num = 1
+                            margin_calc = abs(entry_px * size_val / lev_num) if lev_num else track['margin']
+                            pnl_pct   = pnl_rt / margin_calc * 100 if margin_calc else 0
                             track_alerts.setdefault(chat_id, []).append(
                                 f"{arrow} *{coin}* {'LONG' if is_long else 'SHORT'} "
                                 f"_{track['dex']}_ {track['leverage']}x  size: {abs(size_val)}  {favor_s}\n"
