@@ -100,7 +100,9 @@ PRICES_TIME   = int(os.getenv('PRICES_TIME', '9'))  # ora intera (0-23)
 POSITION_TRACK_INTERVAL = int(os.getenv('POSITION_TRACK_INTERVAL', '300'))
 
 # Silenziamento ordini condizionali dopo "Salta" (default 5 minuti)
-CONDITIONAL_SNOOZE_SECS = int(os.getenv('CONDITIONAL_SNOOZE_SECS', '300'))
+CONDITIONAL_SNOOZE_SECS  = int(os.getenv('CONDITIONAL_SNOOZE_SECS',  '300'))
+# Intervallo re-notifica ordini condizionali (nuovo messaggio con bip, default 2 minuti)
+CONDITIONAL_RENOTIFY_SECS = int(os.getenv('CONDITIONAL_RENOTIFY_SECS', '120'))
 
 # Whitelist chat_id autorizzati a usare comandi wallet/trading (separati da virgola)
 # Es: WALLET_ALLOWED_CHATS=123456789,987654321
@@ -1008,8 +1010,9 @@ async def _set_conditional(update: Update, context: ContextTypes.DEFAULT_TYPE, c
         'usd':        usd_amount,
         'pct':        pct,
         'created_at': datetime.now(),
-        'snoozed_until': None,
-        'alert_message_id': None,  # ID messaggio Telegram attivo — per edit silenzioso
+        'snoozed_until':    None,
+        'alert_message_id': None,   # ID messaggio Telegram attivo — per edit silenzioso
+        'last_notify_ts':   None,   # timestamp ultimo send_message con bip
     }
     monitor.conditional_orders.setdefault(chat_id, {})[oid] = order
     monitor.save_conditional_orders(chat_id)
@@ -2203,24 +2206,37 @@ async def price_polling_task(application: Application):
                         ]])
 
                         try:
-                            mid = o.get('alert_message_id')
+                            mid          = o.get('alert_message_id')
+                            last_notify  = o.get('last_notify_ts') or 0
+                            need_renotify = mid and (now_ts - last_notify >= CONDITIONAL_RENOTIFY_SECS)
+
+                            if need_renotify:
+                                # Cancella il vecchio messaggio sepolto in chat
+                                try:
+                                    await application.bot.delete_message(chat_id=cid, message_id=mid)
+                                except Exception:
+                                    pass
+                                o['alert_message_id'] = None
+                                mid = None
+
                             if mid:
-                                # Aggiorna silenziosamente il messaggio esistente
+                                # Edit silenzioso — aggiorna prezzi/PnL senza bip
                                 await application.bot.edit_message_text(
                                     chat_id=cid, message_id=mid,
                                     text=txt, parse_mode='Markdown',
                                     reply_markup=keyboard
                                 )
                             else:
-                                # Prima volta: send con notifica (bip)
+                                # Nuovo messaggio con bip (prima volta o re-notifica)
                                 sent = await application.bot.send_message(
                                     chat_id=cid, text=txt,
                                     parse_mode='Markdown', reply_markup=keyboard
                                 )
                                 o['alert_message_id'] = sent.message_id
+                                o['last_notify_ts']   = now_ts
                                 monitor.save_conditional_orders(cid)
                         except Exception as e:
-                            if mid and 'message to edit not found' in str(e).lower():
+                            if 'message to edit not found' in str(e).lower():
                                 o['alert_message_id'] = None
                             else:
                                 logger.error(f"Errore cond alert {oid} chat {cid}: {e}")
