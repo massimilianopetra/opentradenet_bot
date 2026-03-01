@@ -317,6 +317,57 @@ La leva usata è quella già configurata sul simbolo con `/setleverage`. Il merc
 
 ---
 
+### Ordini condizionali — Stop Loss e Take Profit
+
+Imposta soglie di prezzo su qualsiasi simbolo. Quando la condizione si verifica, il bot ti notifica ogni 10 secondi con bottoni di azione — **non esegue mai autonomamente**.
+
+| Comando | Descrizione |
+|---|---|
+| `/stoploss SIMBOLO PREZZO` | Alert quando prezzo ≤ PREZZO, chiudi tutto |
+| `/stoploss SIMBOLO PREZZO 200` | Alert quando prezzo ≤ PREZZO, chiudi $200 |
+| `/stoploss SIMBOLO PREZZO 50%` | Alert quando prezzo ≤ PREZZO, chiudi 50% |
+| `/takeprofit SIMBOLO PREZZO` | Alert quando prezzo ≥ PREZZO, chiudi tutto |
+| `/takeprofit SIMBOLO PREZZO 200` | Alert quando prezzo ≥ PREZZO, chiudi $200 |
+| `/takeprofit SIMBOLO PREZZO 50%` | Alert quando prezzo ≥ PREZZO, chiudi 50% |
+| `/orders` | Lista ordini condizionali attivi con ID |
+| `/cancelcond ID` | Cancella un ordine condizionale |
+| `/cancelcond all` | Cancella tutti gli ordini condizionali |
+
+**Esempio flusso stop loss:**
+```
+/stoploss GOLD 5100
+
+✅ Stop Loss impostato — ID: C0001
+GOLD _XYZ_  🔽 ≤  $5,100.00  (tutto)
+
+— quando GOLD scende sotto 5100 —
+
+🛑 Stop Loss — C0001
+
+🔽 GOLD _XYZ_
+Trigger: $5,100.00  Attuale: $5,092.00
+Azione: chiudi posizione (tutto)
+
+[ ✅ Esegui ]  [ ⏭ Salta (5 min) ]  [ 🗑 Cancella ordine ]
+```
+
+**Comportamento bottoni:**
+
+| Bottone | Effetto |
+|---|---|
+| ✅ Esegui | Esegue il close immediatamente e rimuove l'ordine |
+| ⏭ Salta (5 min) | Silenzia per 5 minuti — se il prezzo è ancora in zona riprende a chiedere |
+| 🗑 Cancella ordine | Rimuove definitivamente l'ordine condizionale |
+
+> Il bot continua a notificare ad ogni poll (10s) finché non premi uno dei tre bottoni. Dopo "Salta" torna a notificare allo scadere del silenziamento se la condizione è ancora attiva.
+
+Variabile di configurazione nel `.env`:
+```env
+CONDITIONAL_SNOOZE_SECS=300   # durata silenziamento dopo "Salta" (default 5 minuti)
+```
+
+---
+
 ## Tipi di alert
 
 | Alert | Trigger |
@@ -326,6 +377,8 @@ La leva usata è quella già configurata sul simbolo con `/setleverage`. Il merc
 | 🎯 **Position Alert** | Prezzo posizione varia ±soglia% dal riferimento |
 | 🎯 **Nuova posizione** | Posizione aperta rilevata automaticamente ogni 5 min |
 | 🏁 **Posizione chiusa** | Posizione non più presente nell'API |
+| 🛑 **Stop Loss** | Prezzo ≤ soglia impostata con `/stoploss` |
+| 🎯 **Take Profit** | Prezzo ≥ soglia impostata con `/takeprofit` |
 
 ---
 

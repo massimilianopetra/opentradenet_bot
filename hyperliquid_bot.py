@@ -98,6 +98,9 @@ PRICES_TIME   = int(os.getenv('PRICES_TIME', '9'))  # ora intera (0-23)
 # Intervallo aggiornamento position tracking (default 5 minuti)
 POSITION_TRACK_INTERVAL = int(os.getenv('POSITION_TRACK_INTERVAL', '300'))
 
+# Silenziamento ordini condizionali dopo "Salta" (default 5 minuti)
+CONDITIONAL_SNOOZE_SECS = int(os.getenv('CONDITIONAL_SNOOZE_SECS', '300'))
+
 # Whitelist chat_id autorizzati a usare comandi wallet/trading (separati da virgola)
 # Es: WALLET_ALLOWED_CHATS=123456789,987654321
 # Se vuoto: tutti gli utenti possono registrare le loro credenziali
@@ -149,6 +152,9 @@ class HyperliquidPriceMonitor:
         self.position_tracks:   Dict[int, Dict[str, dict]] = {}
         # Ordini in attesa di conferma: {chat_id: {action, coin, dex, is_buy, usd, expires_at}}
         self.pending_orders:    Dict[int, dict]             = {}
+        # Ordini condizionali: {chat_id: {order_id: {coin, dex, type, trigger_px, action, usd, pct, created_at, snoozed_until}}}
+        self.conditional_orders: Dict[int, Dict[str, dict]] = {}
+        self._cond_id_counter: int = 0
         # chat_id con tracking attivo (default: tutti quelli con address configurato)
         self.tracking_enabled:  Set[int]                   = set()
         self.session: Optional[aiohttp.ClientSession] = None
@@ -333,6 +339,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/close SYM [%|importo]     — chiude posizione (tutto/parziale)\n"
         "/confirm                   — conferma ordine pendente\n"
         "/cancelorder               — annulla ordine pendente\n"
+        "/stoploss SYM PX [sz|%]    — imposta stop loss\n"
+        "/takeprofit SYM PX [sz|%]  — imposta take profit\n"
+        "/orders                    — ordini condizionali attivi\n"
+        "/cancelcond ID|all         — cancella ordine condizionale\n"
         "/stats — statistiche bot\n"
         "/help — questo messaggio\n"
     )
@@ -833,6 +843,170 @@ async def trackpositions(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------------------------------------------------------------
+# Ordini condizionali — stoploss / takeprofit
+# ---------------------------------------------------------------------------
+
+def _next_cond_id() -> str:
+    monitor._cond_id_counter += 1
+    return f"C{monitor._cond_id_counter:04d}"
+
+
+def _cond_label(order: dict) -> str:
+    t     = "🛑 SL" if order['type'] == 'stoploss' else "🎯 TP"
+    arrow = "≤" if order['type'] == 'stoploss' else "≥"
+    size_s = ""
+    if order.get('pct'):
+        size_s = f" {order['pct']*100:.0f}%"
+    elif order.get('usd'):
+        size_s = f" ${order['usd']:,.0f}"
+    else:
+        size_s = " tutto"
+    coin   = order['coin']
+    dex_s  = f" _{order['dex'].upper()}_" if order['dex'] else " PERP"
+    return f"{t} *{coin}*{dex_s} {arrow} ${_fmt(order['trigger_px'])}{size_s}"
+
+
+async def stoploss_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /stoploss SIMBOLO PREZZO [importo|%]
+    Es: /stoploss GOLD 5100
+        /stoploss GOLD 5100 200     — chiudi $200
+        /stoploss GOLD 5100 50%     — chiudi 50%
+    Triggera quando prezzo <= PREZZO.
+    """
+    await _set_conditional(update, context, 'stoploss')
+
+
+async def takeprofit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /takeprofit SIMBOLO PREZZO [importo|%]
+    Es: /takeprofit GOLD 5600
+        /takeprofit NFLX 155 50%
+    Triggera quando prezzo >= PREZZO.
+    """
+    await _set_conditional(update, context, 'takeprofit')
+
+
+async def _set_conditional(update: Update, context: ContextTypes.DEFAULT_TYPE, ctype: str):
+    chat_id = update.effective_chat.id
+    if not _is_wallet_allowed(chat_id):
+        await update.message.reply_text("❌ Non autorizzato.")
+        return
+
+    label = "Stop Loss" if ctype == 'stoploss' else "Take Profit"
+    arrow = "≤ (scende sotto)" if ctype == 'stoploss' else "≥ (sale sopra)"
+
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            f"📌 *{label}*\n\n"
+            f"Uso: /{ctype.replace('profit','profit')} SIMBOLO PREZZO [importo|%]\n\n"
+            f"Triggera quando prezzo {arrow}\n\n"
+            f"Esempi:\n"
+            f"  /{ctype} GOLD 5100         — chiudi tutto\n"
+            f"  /{ctype} GOLD 5100 200     — chiudi $200\n"
+            f"  /{ctype} GOLD 5100 50%     — chiudi 50%",
+            parse_mode='Markdown'
+        )
+        return
+
+    symbol = context.args[0].upper()
+    try:
+        trigger_px = float(context.args[1].replace(',', '.'))
+    except ValueError:
+        await update.message.reply_text("❌ Prezzo non valido.")
+        return
+
+    usd_amount = None
+    pct        = None
+    if len(context.args) > 2:
+        arg = context.args[2]
+        if arg.endswith('%'):
+            try:    pct = float(arg[:-1]) / 100
+            except: await update.message.reply_text("❌ Percentuale non valida."); return
+        else:
+            try:    usd_amount = float(arg.replace(',', '.'))
+            except: await update.message.reply_text("❌ Importo non valido."); return
+
+    dex    = await _detect_dex(symbol)
+    oid    = _next_cond_id()
+    order  = {
+        'coin':       symbol,
+        'dex':        dex,
+        'type':       ctype,
+        'trigger_px': trigger_px,
+        'usd':        usd_amount,
+        'pct':        pct,
+        'created_at': datetime.now(),
+        'snoozed_until': None,
+    }
+    monitor.conditional_orders.setdefault(chat_id, {})[oid] = order
+
+    size_s = ""
+    if pct:        size_s = f" ({pct*100:.0f}%)"
+    elif usd_amount: size_s = f" (${usd_amount:,.0f})"
+    else:          size_s = " (tutto)"
+    market_s = f"_{dex.upper()}_" if dex else "PERP"
+    sym_arrow = "🔽 ≤" if ctype == 'stoploss' else "🔼 ≥"
+
+    await update.message.reply_text(
+        f"✅ *{label} impostato* — ID: `{oid}`\n\n"
+        f"*{symbol}* {market_s}  {sym_arrow}  ${_fmt(trigger_px)}{size_s}\n\n"
+        f"Usa /orders per vedere gli ordini attivi\n"
+        f"/cancelcond {oid} per cancellare",
+        parse_mode='Markdown'
+    )
+
+
+async def orders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lista tutti gli ordini condizionali attivi."""
+    chat_id = update.effective_chat.id
+    conds   = monitor.conditional_orders.get(chat_id, {})
+    if not conds:
+        await update.message.reply_text("📋 Nessun ordine condizionale attivo.")
+        return
+
+    msg = "📋 *Ordini condizionali attivi*\n\n"
+    for oid, o in conds.items():
+        snooze_s = ""
+        if o.get('snoozed_until') and datetime.now().timestamp() < o['snoozed_until']:
+            rem = int(o['snoozed_until'] - datetime.now().timestamp())
+            snooze_s = f"  💤 silenziato {rem}s"
+        msg += f"`{oid}` {_cond_label(o)}{snooze_s}\n"
+
+    msg += f"\nUsa /cancelcond ID per cancellare"
+    await update.message.reply_text(msg, parse_mode='Markdown')
+
+
+async def cancelcond_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /cancelcond ID   — cancella ordine condizionale
+    /cancelcond all  — cancella tutti
+    """
+    chat_id = update.effective_chat.id
+    conds   = monitor.conditional_orders.get(chat_id, {})
+
+    if not context.args:
+        await update.message.reply_text("Uso: /cancelcond ID  oppure  /cancelcond all")
+        return
+
+    arg = context.args[0].upper()
+    if arg == 'ALL':
+        n = len(conds)
+        monitor.conditional_orders[chat_id] = {}
+        await update.message.reply_text(f"🗑 Cancellati {n} ordini condizionali.")
+        return
+
+    if arg not in conds:
+        await update.message.reply_text(f"❌ Ordine `{arg}` non trovato.", parse_mode='Markdown')
+        return
+
+    o = conds.pop(arg)
+    await update.message.reply_text(
+        f"🗑 Cancellato: {_cond_label(o)}", parse_mode='Markdown'
+    )
+
+
+# ---------------------------------------------------------------------------
 # Helper ordini
 # ---------------------------------------------------------------------------
 
@@ -1229,6 +1403,80 @@ async def order_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         monitor.pending_orders.pop(chat_id, None)
         await query.edit_message_reply_markup(reply_markup=None)
         await query.message.reply_text("🚫 Ordine annullato.")
+
+
+async def cond_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Gestisce i bottoni Esegui / Salta / Cancella degli ordini condizionali."""
+    query = update.callback_query
+    await query.answer()
+    data  = query.data  # cond_exec_CHATID_OID | cond_snooze_... | cond_cancel_...
+
+    parts  = data.split('_')
+    action = parts[1]           # exec | snooze | cancel
+    cid    = int(parts[2])
+    oid    = parts[3]
+
+    conds = monitor.conditional_orders.get(cid, {})
+    order = conds.get(oid)
+
+    await query.edit_message_reply_markup(reply_markup=None)
+
+    if not order:
+        await query.message.reply_text(f"ℹ️ Ordine `{oid}` non più attivo.", parse_mode='Markdown')
+        return
+
+    if action == 'cancel':
+        conds.pop(oid, None)
+        await query.message.reply_text(
+            f"🗑 Ordine cancellato: {_cond_label(order)}", parse_mode='Markdown'
+        )
+
+    elif action == 'snooze':
+        order['snoozed_until'] = datetime.now().timestamp() + CONDITIONAL_SNOOZE_SECS
+        mins = CONDITIONAL_SNOOZE_SECS // 60
+        await query.message.reply_text(
+            f"💤 `{oid}` silenziato per {mins} minuti.", parse_mode='Markdown'
+        )
+
+    elif action == 'exec':
+        await query.message.reply_text("⏳ Esecuzione ordine condizionale...")
+        addr   = wallet_store.get_address(cid)
+        key    = wallet_store.get_key(cid)
+        symbol = order['coin']
+        dex    = order['dex']
+        client = HyperliquidClient(addr, private_key=key)
+
+        try:
+            result = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: client.market_close(
+                    symbol, dex,
+                    usd_amount=order.get('usd'),
+                    pct=order.get('pct')
+                )
+            )
+            logger.info(f"COND ORDER exec {oid} {symbol} chat {cid}: {result}")
+
+            if isinstance(result, dict) and result.get('status') == 'err':
+                await query.message.reply_text(f"❌ Errore exchange: {result.get('response', result)}")
+                return
+
+            # Rimuove l'ordine dopo esecuzione
+            conds.pop(oid, None)
+
+            size = result.get('_size', '?')
+            market_s = f"_{dex.upper()}_" if dex else "PERP"
+            t_label  = "🛑 Stop Loss" if order['type'] == 'stoploss' else "🎯 Take Profit"
+
+            await query.message.reply_text(
+                f"✅ *{t_label} eseguito*\n\n"
+                f"🔴 CLOSE *{symbol}* {market_s}\n"
+                f"Size: {size}\n"
+                f"⏰ {datetime.now().strftime('%H:%M:%S')}",
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            logger.error(f"Errore exec cond {oid} {symbol} chat {cid}: {e}")
+            await query.message.reply_text(f"❌ Errore: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -1752,6 +2000,57 @@ async def price_polling_task(application: Application):
                     if coin in monitor.position_tracks.get(chat_id, {}):
                         monitor.position_tracks[chat_id][coin]['alert_base'] = new_base
 
+            # --- ORDINI CONDIZIONALI: stoploss / takeprofit ---
+            now_ts = datetime.now().timestamp()
+            for cid, conds in list(monitor.conditional_orders.items()):
+                for oid, o in list(conds.items()):
+                    coin      = o['coin']
+                    price_info = all_prices.get(coin)
+                    if not price_info:
+                        continue
+                    current_px = price_info[0]
+
+                    # Verifica trigger
+                    triggered = (
+                        (o['type'] == 'stoploss'   and current_px <= o['trigger_px']) or
+                        (o['type'] == 'takeprofit' and current_px >= o['trigger_px'])
+                    )
+                    if not triggered:
+                        continue
+
+                    # Silenziato dopo "Salta"?
+                    if o.get('snoozed_until') and now_ts < o['snoozed_until']:
+                        continue
+
+                    # Invia alert con bottoni
+                    t_label  = "🛑 Stop Loss" if o['type'] == 'stoploss' else "🎯 Take Profit"
+                    arrow    = "🔽" if o['type'] == 'stoploss' else "🔼"
+                    dex_s    = f"_{o['dex'].upper()}_" if o['dex'] else "PERP"
+                    size_s   = ""
+                    if o.get('pct'):       size_s = f"  ({o['pct']*100:.0f}%)"
+                    elif o.get('usd'):     size_s = f"  (${o['usd']:,.0f})"
+                    else:                  size_s = "  (tutto)"
+
+                    keyboard = InlineKeyboardMarkup([[
+                        InlineKeyboardButton("✅ Esegui",          callback_data=f"cond_exec_{cid}_{oid}"),
+                        InlineKeyboardButton("⏭ Salta (5 min)",   callback_data=f"cond_snooze_{cid}_{oid}"),
+                        InlineKeyboardButton("🗑 Cancella ordine", callback_data=f"cond_cancel_{cid}_{oid}"),
+                    ]])
+                    try:
+                        await application.bot.send_message(
+                            chat_id=cid,
+                            text=(
+                                f"{t_label} — `{oid}`\n\n"
+                                f"{arrow} *{coin}* {dex_s}\n"
+                                f"Trigger: ${_fmt(o['trigger_px'])}  Attuale: ${_fmt(current_px)}\n"
+                                f"Azione: chiudi posizione{size_s}"
+                            ),
+                            parse_mode='Markdown',
+                            reply_markup=keyboard
+                        )
+                    except Exception as e:
+                        logger.error(f"Errore invio cond alert {oid} chat {cid}: {e}")
+
             # --- PRICESPIKE: confronto poll-to-poll su lista fissa ---
             if monitor.spike_subscribers:
                 # Costruisce la lista spike: extra fissi + tutti i simboli xyz dal batch
@@ -1880,6 +2179,11 @@ def main():
     app.add_handler(CommandHandler("confirm",        confirm_command))
     app.add_handler(CommandHandler("cancelorder",    cancelorder_command))
     app.add_handler(CallbackQueryHandler(order_callback, pattern="^order_"))
+    app.add_handler(CallbackQueryHandler(cond_callback,  pattern="^cond_"))
+    app.add_handler(CommandHandler("stoploss",     stoploss_command))
+    app.add_handler(CommandHandler("takeprofit",   takeprofit_command))
+    app.add_handler(CommandHandler("orders",       orders_command))
+    app.add_handler(CommandHandler("cancelcond",   cancelcond_command))
 
     app.post_init     = post_init
     app.post_shutdown = post_shutdown
