@@ -1970,17 +1970,34 @@ async def walletinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             equity    = summary['account_value']
             margin    = summary['total_margin']
             available = max(equity - margin, 0)
-            ntl_pos   = summary['total_ntl_pos']
+            ntl_perp  = summary['total_ntl_pos']  # solo perp standard dall'API
+
+            # Esposizione XYZ dalle posizioni tracciate in memoria
+            ntl_xyz = 0.0
+            tracks  = monitor.position_tracks.get(chat_id, {})
+            all_px  = await monitor.fetch_all_prices() if tracks else {}
+            for coin, track in tracks.items():
+                if not track.get('dex'):
+                    continue  # skip perp standard, già in ntl_perp
+                price_info = all_px.get(coin)
+                if price_info:
+                    ntl_xyz += abs(track['size'] * price_info[0])
+
+            ntl_tot = ntl_perp + ntl_xyz
 
             # Ordini condizionali attivi
             n_conds = len(monitor.conditional_orders.get(chat_id, {}))
 
+            ntl_line = f"  Esposizione tot:  ${ntl_tot:,.2f}"
+            if ntl_xyz > 0:
+                ntl_line += f"  (PERP ${ntl_perp:,.2f} + XYZ ${ntl_xyz:,.2f})"
+
             msg += (
                 f"\n💰 *Saldo*\n"
-                f"  Equity:      ${equity:>12,.2f}\n"
-                f"  Margine usato: ${margin:>10,.2f}\n"
-                f"  Disponibile:  ${available:>10,.2f}\n"
-                f"  Posizione noz: ${ntl_pos:>9,.2f}\n"
+                f"  Equity:           ${equity:,.2f}\n"
+                f"  Margine usato:    ${margin:,.2f}\n"
+                f"  Disponibile:      ${available:,.2f}\n"
+                f"{ntl_line}\n"
             )
             if n_conds:
                 msg += f"\n📌 Ordini condizionali attivi: {n_conds}  (/orders per dettagli)\n"
