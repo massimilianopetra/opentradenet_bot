@@ -881,7 +881,7 @@ async def fetch_candles_15m(symbol: str, dex: str = '') -> list:
     # Calcola window: ultime 2 candele (coprono l'intervallo corrente + precedente)
     import time
     now_ms   = int(time.time() * 1000)
-    start_ms = now_ms - 30 * 60 * 1000  # 30 minuti fa
+    start_ms = now_ms - 90 * 60 * 1000  # 90 minuti fa = 6 candele da 15m
 
     payload = {
         "type":       "candleSnapshot",
