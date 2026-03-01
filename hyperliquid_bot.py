@@ -678,7 +678,7 @@ async def list_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE)
             # Formatter prezzi: decimali adattivi (2 per grandi, 4 per piccoli)
             def fmt(x):
                 if x == 0: return "0"
-                if x >= 100:  return f"{x:,.2f}"
+                if x >= 1000: return f"{x:,.2f}"
                 if x >= 1:    return f"{x:,.3f}"
                 return f"{x:,.5f}"
 
@@ -1873,7 +1873,7 @@ async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg   += "─" * 30 + "\n"
     def fmt_px(x):
         if x == 0: return "0"
-        if x >= 100: return f"{x:,.2f}"
+        if x >= 1000: return f"{x:,.2f}"
         if x >= 1:   return f"{x:,.3f}"
         return f"{x:,.5f}"
 
@@ -2098,8 +2098,8 @@ async def price_polling_task(application: Application):
                             track_alerts.setdefault(chat_id, []).append(
                                 f"{arrow} *{coin}* {'LONG' if is_long else 'SHORT'} "
                                 f"_{track['dex']}_ {track['leverage']}x  size: {abs(size_val)}  {favor_s}\n"
-                                f"  Rif: ${base:,.2f}  →  ${current_price:,.2f}  ({pct:+.2f}%)\n"
-                                f"  Entry: ${entry_px:,.2f}  →  ${current_price:,.2f}  ({pct_entry:+.2f}%)\n"
+                                f"  Rif: ${_fmt(base)}  →  ${_fmt(current_price)}  ({pct:+.2f}%)\n"
+                                f"  Entry: ${_fmt(entry_px)}  →  ${_fmt(current_price)}  ({pct_entry:+.2f}%)\n"
                                 f"  PnL: {pnl_rt_s}${pnl_rt:.2f} ({pnl_rt_s}{pnl_pct:.1f}%)\n"
                                 f"  Liq dist: {liq_dist:.1f}%"
                             )
