@@ -93,7 +93,9 @@ SPIKE_EXCLUDE_SYMBOLS  = {s.strip().upper() for s in os.getenv('SPIKE_EXCLUDE_SY
 # Directory storico prezzi giornalieri (un CSV per simbolo)
 # Record_TIME: ora dopo cui scrivere la quotazione del giorno (default 09:00)
 PRICES_DIR    = Path(os.getenv('PRICES_DIR', 'data/prices'))
-COND_DIR      = Path(os.getenv('COND_DIR', 'data/conditional_orders'))
+COND_DIR      = Path(os.getenv('COND_DIR',   'data/conditional_orders'))
+CANDLES_DIR   = Path(os.getenv('CANDLES_DIR', 'data/candles'))
+CANDLES_INTERVAL_SECS = int(os.getenv('CANDLES_INTERVAL_SECS', '900'))  # 900s = 15 minuti
 PRICES_TIME   = int(os.getenv('PRICES_TIME', '9'))  # ora intera (0-23)
 
 # Intervallo aggiornamento position tracking (default 5 minuti)
@@ -861,6 +863,160 @@ def save_daily_snapshot(prices: Dict[str, Tuple[float, str, Optional[str]]]) -> 
             logger.error(f"Errore scrittura snapshot {sym}: {e}")
 
     return written
+
+
+# ---------------------------------------------------------------------------
+# Candele 15 minuti
+# ---------------------------------------------------------------------------
+
+async def fetch_candles_15m(symbol: str, dex: str = '') -> list:
+    """
+    Fetcha le ultime N candele a 15 minuti per un simbolo da Hyperliquid.
+    Ritorna lista di dict: {timestamp, open, high, low, close, volume}
+    """
+    import aiohttp
+    # Hyperliquid vuole il nome interno: 'xyz:GOLD' per i dex, 'GOLD' per perp standard
+    internal_name = f"{dex}:{symbol}" if dex else symbol
+
+    # Calcola window: ultime 2 candele (coprono l'intervallo corrente + precedente)
+    import time
+    now_ms   = int(time.time() * 1000)
+    start_ms = now_ms - 30 * 60 * 1000  # 30 minuti fa
+
+    payload = {
+        "type":       "candleSnapshot",
+        "req": {
+            "coin":       internal_name,
+            "interval":   "15m",
+            "startTime":  start_ms,
+            "endTime":    now_ms,
+        }
+    }
+    if dex:
+        payload["dex"] = dex
+
+    async with aiohttp.ClientSession() as sess:
+        async with sess.post(
+            'https://api.hyperliquid.xyz/info',
+            json=payload,
+            timeout=aiohttp.ClientTimeout(total=10)
+        ) as r:
+            data = await r.json()
+
+    if not isinstance(data, list) or not data:
+        return []
+
+    result = []
+    for c in data:
+        try:
+            result.append({
+                'timestamp': datetime.utcfromtimestamp(c['t'] / 1000).strftime('%Y-%m-%d %H:%M:%S'),
+                'open':      float(c['o']),
+                'high':      float(c['h']),
+                'low':       float(c['l']),
+                'close':     float(c['c']),
+                'volume':    float(c['v']),
+            })
+        except Exception:
+            continue
+    return result
+
+
+def save_candles(symbol: str, candles: list) -> int:
+    """
+    Salva le candele in data/candles/SIMBOLO/SIMBOLO_15m.csv
+    Salta righe con timestamp già presenti (deduplicazione).
+    Ritorna il numero di righe nuove scritte.
+    """
+    if not candles:
+        return 0
+
+    sym_dir  = CANDLES_DIR / symbol
+    sym_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = sym_dir / f"{symbol}_15m.csv"
+
+    # Carica timestamp già presenti per deduplicazione
+    existing = set()
+    if csv_path.exists():
+        try:
+            with open(csv_path, 'r', encoding='utf-8') as f:
+                reader = csv.reader(f)
+                next(reader, None)  # salta header
+                for row in reader:
+                    if row:
+                        existing.add(row[0])
+        except Exception:
+            pass
+
+    is_new  = not csv_path.exists()
+    written = 0
+    try:
+        with open(csv_path, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            if is_new:
+                writer.writerow(['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            for c in candles:
+                if c['timestamp'] not in existing:
+                    writer.writerow([
+                        c['timestamp'], c['open'], c['high'],
+                        c['low'], c['close'], c['volume']
+                    ])
+                    existing.add(c['timestamp'])
+                    written += 1
+    except Exception as e:
+        logger.error(f"Errore scrittura candele {symbol}: {e}")
+
+    return written
+
+
+async def candle_task(application: Application):
+    """
+    Task che ogni 15 minuti fetcha e salva le candele per tutti i simboli
+    monitorati (stessi del daily snapshot: xyz + SPIKE_EXTRA_SYMBOLS).
+    """
+    logger.info(f"🕯 Task candele avviato (intervallo: {CANDLES_INTERVAL_SECS}s)")
+    CANDLES_DIR.mkdir(parents=True, exist_ok=True)
+
+    while True:
+        try:
+            # Fetch prezzi per ricavare l'universo simboli + info dex
+            all_prices = await monitor.fetch_all_prices()
+
+            xyz_syms      = {sym: v for sym, (_, _, dex) in all_prices.items()
+                             if dex and dex.upper() == 'XYZ'
+                             for sym, v in [(sym, all_prices[sym])]}
+            # Ricostruisce correttamente
+            xyz_set       = {sym for sym, (_, _, dex) in all_prices.items() if dex and dex.upper() == 'XYZ'}
+            extra_set     = set(SPIKE_EXTRA_SYMBOLS)
+            all_symbols   = xyz_set | extra_set
+
+            total_written = 0
+            errors        = 0
+
+            for sym in sorted(all_symbols):
+                info = all_prices.get(sym)
+                dex  = info[2].lower() if info and info[2] else ''
+                try:
+                    candles = await fetch_candles_15m(sym, dex)
+                    n       = save_candles(sym, candles)
+                    total_written += n
+                    if n:
+                        logger.debug(f"Candele {sym}: {n} nuove righe salvate")
+                except Exception as e:
+                    errors += 1
+                    logger.warning(f"Errore fetch candele {sym}: {e}")
+                # Piccola pausa tra simboli per non martellare l'API
+                await asyncio.sleep(0.3)
+
+            logger.info(
+                f"🕯 Candele 15m: {total_written} righe scritte su {len(all_symbols)} simboli"
+                + (f" ({errors} errori)" if errors else "")
+            )
+
+        except Exception as e:
+            logger.error(f"Errore nel candle task: {e}", exc_info=True)
+
+        await asyncio.sleep(CANDLES_INTERVAL_SECS)
 
 
 # ---------------------------------------------------------------------------
@@ -2342,6 +2498,7 @@ async def post_init(application: Application):
 
     asyncio.create_task(price_polling_task(application))
     asyncio.create_task(position_tracking_task(application))
+    asyncio.create_task(candle_task(application))
 
 async def post_shutdown(application: Application):
     await monitor.close_session()
