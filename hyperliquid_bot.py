@@ -9,8 +9,8 @@ from datetime import datetime, date
 from pathlib import Path
 from dotenv import load_dotenv
 import aiohttp
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from hl_wallet import WalletStore, HyperliquidClient, generate_encryption_key
 
 # ---------------------------------------------------------------------------
@@ -960,16 +960,19 @@ async def _prepare_order(update, chat_id, symbol, usd, is_buy):
         'expires_at': expires_at,
     }
 
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Conferma", callback_data="order_confirm"),
+        InlineKeyboardButton("🚫 Annulla",  callback_data="order_cancel"),
+    ]])
     await update.message.reply_text(
         f"⚠️ *Conferma ordine*\n\n"
         f"{direction} *{symbol}* {market_s}\n"
         f"Importo: ${usd:,.2f}\n"
         f"Prezzo attuale: ${_fmt(price)}\n"
-        f"Size stimata: {size:.4f}\n\n"
-        f"Invia /confirm per eseguire\n"
-        f"Invia /cancelorder per annullare\n"
+        f"Size stimata: {size:.4f}\n"
         f"⏰ Scade in 30 secondi",
-        parse_mode='Markdown'
+        parse_mode='Markdown',
+        reply_markup=keyboard
     )
 
 
@@ -1053,14 +1056,17 @@ async def close_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'expires_at': expires_at,
     }
 
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Conferma", callback_data="order_confirm"),
+        InlineKeyboardButton("🚫 Annulla",  callback_data="order_cancel"),
+    ]])
     await update.message.reply_text(
         f"⚠️ *Conferma chiusura*\n\n"
         f"🔴 CLOSE *{symbol}* {market_s}\n"
-        f"{size_info}\n\n"
-        f"Invia /confirm per eseguire\n"
-        f"Invia /cancelorder per annullare\n"
+        f"{size_info}\n"
         f"⏰ Scade in 30 secondi",
-        parse_mode='Markdown'
+        parse_mode='Markdown',
+        reply_markup=keyboard
     )
 
 
@@ -1146,6 +1152,78 @@ async def cancelorder_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("🚫 Ordine annullato.")
     else:
         await update.message.reply_text("ℹ️ Nessun ordine in attesa.")
+
+
+async def order_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Gestisce i bottoni inline Conferma / Annulla degli ordini."""
+    query   = update.callback_query
+    chat_id = query.message.chat_id
+    await query.answer()  # rimuove il "loading" sul bottone
+
+    if query.data == "order_confirm":
+        # Rimuove i bottoni dal messaggio originale
+        await query.edit_message_reply_markup(reply_markup=None)
+        # Esegue come se l'utente avesse scritto /confirm
+        order = monitor.pending_orders.get(chat_id)
+        if not order:
+            await query.message.reply_text("⏰ Ordine scaduto o già eseguito.")
+            return
+        if datetime.now().timestamp() > order['expires_at']:
+            monitor.pending_orders.pop(chat_id, None)
+            await query.message.reply_text("⏰ Ordine scaduto. Ripeti il comando.")
+            return
+        monitor.pending_orders.pop(chat_id, None)
+        await query.message.reply_text("⏳ Esecuzione ordine...")
+
+        addr   = wallet_store.get_address(chat_id)
+        key    = wallet_store.get_key(chat_id)
+        symbol = order['symbol']
+        dex    = order['dex']
+        client = HyperliquidClient(addr, private_key=key)
+
+        try:
+            if order['is_buy'] is None:
+                result    = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: client.market_close(symbol, dex,
+                                                      usd_amount=order.get('usd'),
+                                                      pct=order.get('pct'))
+                )
+                direction = "🔴 CLOSE"
+            else:
+                result    = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: client.market_open(symbol, order['is_buy'], order['usd'], dex)
+                )
+                direction = "📈 LONG" if order['is_buy'] else "📉 SHORT"
+
+            logger.info(f"ORDER (btn) {direction} {symbol} chat {chat_id}: {result}")
+
+            if isinstance(result, dict) and result.get('status') == 'err':
+                await query.message.reply_text(f"❌ Errore exchange: {result.get('response', result)}")
+                return
+
+            market_s   = f"_{dex.upper()}_" if dex else "PERP"
+            size       = result.get('_size', '?')
+            price      = result.get('_price')
+            usd        = result.get('_usd') or order.get('usd')
+            price_line = f"Prezzo: ${_fmt(price)}\n" if isinstance(price, float) else ""
+            usd_line   = f"Importo: ${usd:,.2f}\n" if isinstance(usd, (int, float)) else ""
+
+            await query.message.reply_text(
+                f"✅ *Ordine eseguito*\n\n"
+                f"{direction} *{symbol}* {market_s}\n"
+                f"Size: {size}\n"
+                f"{price_line}{usd_line}"
+                f"⏰ {datetime.now().strftime('%H:%M:%S')}",
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            logger.error(f"Errore esecuzione ordine (btn) {symbol} chat {chat_id}: {e}")
+            await query.message.reply_text(f"❌ Errore: {e}")
+
+    elif query.data == "order_cancel":
+        monitor.pending_orders.pop(chat_id, None)
+        await query.edit_message_reply_markup(reply_markup=None)
+        await query.message.reply_text("🚫 Ordine annullato.")
 
 
 # ---------------------------------------------------------------------------
@@ -1627,14 +1705,18 @@ async def price_polling_task(application: Application):
                             liq_dist = abs((liq - current_price) / current_price * 100) if liq else 0
                             logger.info(f"TRACK ALERT {coin}: {pct:+.2f}% -> chat {chat_id}")
                             entry_px  = track['entry_px']
+                            size_val  = track['size']  # positivo=long, negativo=short
                             pct_entry = (current_price - entry_px) / entry_px * 100 if entry_px else 0
-                            pnl_pct   = pnl / track['margin'] * 100 if track['margin'] else 0
+                            # PnL real-time: per long (current-entry)*size, per short (entry-current)*size
+                            pnl_rt    = (current_price - entry_px) * size_val
+                            pnl_rt_s  = "+" if pnl_rt >= 0 else ""
+                            pnl_pct   = pnl_rt / track['margin'] * 100 if track['margin'] else 0
                             track_alerts.setdefault(chat_id, []).append(
                                 f"{arrow} *{coin}* {'LONG' if is_long else 'SHORT'} "
-                                f"_{track['dex']}_ {track['leverage']}x  {favor_s}\n"
+                                f"_{track['dex']}_ {track['leverage']}x  size: {abs(size_val)}  {favor_s}\n"
                                 f"  Rif: ${base:,.2f}  →  ${current_price:,.2f}  ({pct:+.2f}%)\n"
                                 f"  Entry: ${entry_px:,.2f}  →  ${current_price:,.2f}  ({pct_entry:+.2f}%)\n"
-                                f"  PnL: {pnl_s}${pnl:.2f} ({pnl_s}{pnl_pct:.1f}%)\n"
+                                f"  PnL: {pnl_rt_s}${pnl_rt:.2f} ({pnl_rt_s}{pnl_pct:.1f}%)\n"
                                 f"  Liq dist: {liq_dist:.1f}%"
                             )
                             track_triggered.append((chat_id, coin, current_price))
@@ -1784,6 +1866,7 @@ def main():
     app.add_handler(CommandHandler("close",          close_command))
     app.add_handler(CommandHandler("confirm",        confirm_command))
     app.add_handler(CommandHandler("cancelorder",    cancelorder_command))
+    app.add_handler(CallbackQueryHandler(order_callback, pattern="^order_"))
 
     app.post_init     = post_init
     app.post_shutdown = post_shutdown
