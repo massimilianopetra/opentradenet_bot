@@ -1236,10 +1236,15 @@ async def _set_conditional(update: Update, context: ContextTypes.DEFAULT_TYPE, c
     if pct:          size_s = f" ({pct*100:.0f}%)"
     elif usd_amount: size_s = f" (${usd_amount:,.0f})"
     else:            size_s = " (tutto)"
-    market_s  = f"_{dex.upper()}_" if dex else "PERP"
-    sym_arrow = "🔽 ≤" if ctype == 'stoploss' else "🔼 ≥"
-    dir_s     = "LONG" if is_long else "SHORT"
-    upd_note  = f" _(sostituisce {old_oid})_" if old_oid else ""
+    market_s = f"_{dex.upper()}_" if dex else "PERP"
+    dir_s    = "LONG" if is_long else "SHORT"
+    upd_note = f" _(sostituisce {old_oid})_" if old_oid else ""
+
+    # Freccia e operatore corretti per direzione + tipo ordine
+    if ctype == 'stoploss':
+        sym_arrow = "🔽 ≤" if is_long else "🔼 ≥"
+    else:  # takeprofit
+        sym_arrow = "🔼 ≥" if is_long else "🔽 ≤"
 
     await update.message.reply_text(
         f"✅ *{label} impostato* — `{oid}`{upd_note}\n\n"
@@ -2416,22 +2421,25 @@ async def price_polling_task(application: Application):
                             is_long  = track['is_long'] if track else True
                             peak     = o.get('tp_peak_price')
 
-                            # Aggiorna il picco
+                            # Aggiorna il picco e calcola ritracciamento
+                            retrace_pct = 0.0
                             if is_long:
+                                # Long: il picco è il massimo — aspettiamo che scenda
                                 if peak is None or current_px > peak:
                                     o['tp_peak_price'] = current_px
                                     peak = current_px
-                                drop_pct = (peak - current_px) / peak * 100 if peak else 0
-                                trailing_triggered = drop_pct >= CONDITIONAL_TP_TRAILING_PCT
-                            else:  # short: picco = minimo
+                                retrace_pct = (peak - current_px) / peak * 100 if peak else 0
+                            else:
+                                # Short: il picco è il minimo — aspettiamo che risalga
                                 if peak is None or current_px < peak:
                                     o['tp_peak_price'] = current_px
                                     peak = current_px
-                                rise_pct = (current_px - peak) / peak * 100 if peak else 0
-                                trailing_triggered = rise_pct >= CONDITIONAL_TP_TRAILING_PCT
+                                retrace_pct = (current_px - peak) / peak * 100 if peak else 0
+
+                            trailing_triggered = retrace_pct >= CONDITIONAL_TP_TRAILING_PCT
 
                             if trailing_triggered:
-                                logger.info(f"TP TRAILING AUTO-CLOSE {coin} chat {cid}")
+                                logger.info(f"TP TRAILING AUTO-CLOSE {coin} chat {cid} retrace={retrace_pct:.2f}%")
                                 try:
                                     _key    = wallet_store.get_key(cid)
                                     _addr   = wallet_store.get_address(cid)
@@ -2443,7 +2451,7 @@ async def price_polling_task(application: Application):
                                     )
                                     conds.pop(oid, None)
                                     monitor.save_conditional_orders(cid)
-                                    _retrace = drop_pct if is_long else rise_pct
+                                    _retrace = retrace_pct
                                     _close_txt = (
                                         f"🎯✅ *Take Profit — chiusura trailing automatica*\n\n"
                                         f"*{coin}* {'_'+o['dex'].upper()+'_' if o['dex'] else 'PERP'}\n"
