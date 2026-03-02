@@ -2392,11 +2392,23 @@ async def price_polling_task(application: Application):
                         is_tp = o['type'] == 'takeprofit'
                         is_sl = o['type'] == 'stoploss'
 
-                        # Verifica trigger
-                        triggered = (
-                            (is_sl and current_px <= o['trigger_px']) or
-                            (is_tp and current_px >= o['trigger_px'])
-                        )
+                        # Direzione della posizione (long o short)
+                        _track   = monitor.position_tracks.get(cid, {}).get(coin)
+                        is_long  = _track['is_long'] if _track else True
+
+                        # Verifica trigger — dipende dalla direzione della posizione:
+                        # LONG:  TP scatta quando prezzo >= trigger, SL quando prezzo <= trigger
+                        # SHORT: TP scatta quando prezzo <= trigger, SL quando prezzo >= trigger
+                        if is_long:
+                            triggered = (
+                                (is_sl and current_px <= o['trigger_px']) or
+                                (is_tp and current_px >= o['trigger_px'])
+                            )
+                        else:
+                            triggered = (
+                                (is_sl and current_px >= o['trigger_px']) or
+                                (is_tp and current_px <= o['trigger_px'])
+                            )
 
                         # ── TRAILING STOP automatico per TAKEPROFIT ──────────────────────
                         if is_tp and triggered:
