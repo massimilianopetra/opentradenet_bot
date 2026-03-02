@@ -2252,15 +2252,50 @@ async def position_tracking_task(application: Application):
                 current_tracks = monitor.position_tracks.get(chat_id, {})
                 new_tracks     = {}
                 threshold      = monitor.get_threshold(chat_id)
+                is_first_cycle = chat_id not in monitor._first_track_done
 
                 # Simboli attualmente aperti dall'API
                 for p in pos_list:
                     coin = p['coin']
+                    dex_s = f"_{p.get('dex','PERP').upper()}_" if p.get('dex') else "PERP"
+                    dir_s = "📈 LONG" if p['is_long'] else "📉 SHORT"
 
                     if coin in current_tracks:
-                        # Posizione già tracciata — aggiorna TUTTI i dati dall'API
-                        # entry_px si aggiorna per averaging up/down su posizioni aggiunte
-                        track = current_tracks[coin].copy()
+                        # Posizione già tracciata — confronta per rilevare modifiche
+                        old_track = current_tracks[coin]
+                        old_size  = abs(old_track['size'])
+                        new_size  = abs(p['size'])
+                        old_entry = old_track['entry_px']
+                        new_entry = p['entry_px']
+
+                        # Notifica se size o entry_px sono cambiati significativamente
+                        size_changed  = abs(new_size - old_size) / old_size > 0.001 if old_size else False
+                        entry_changed = abs(new_entry - old_entry) / old_entry > 0.001 if old_entry else False
+
+                        if (size_changed or entry_changed) and not is_first_cycle:
+                            change_parts = []
+                            if size_changed:
+                                change_parts.append(
+                                    f"Size: {old_size} → {new_size} "                                    f"({'▲' if new_size > old_size else '▼'})"                                )
+                            if entry_changed:
+                                change_parts.append(
+                                    f"Entry: ${_fmt(old_entry)} → ${_fmt(new_entry)}"                                )
+                            try:
+                                await application.bot.send_message(
+                                    chat_id=chat_id,
+                                    text=(
+                                        f"✏️ *Posizione aggiornata*: *{coin}*\n\n"
+                                        f"{dir_s} {dex_s} {p['leverage']}x\n"
+                                        + "\n".join(change_parts) +
+                                        f"\nMargin: ${p['margin']:.2f}  Liq: ${_fmt(p['liq_px'])}"
+                                    ),
+                                    parse_mode='Markdown'
+                                )
+                            except Exception as e:
+                                logger.error(f"Errore notifica aggiornamento posizione {chat_id}: {e}")
+
+                        # Aggiorna tutti i dati
+                        track = old_track.copy()
                         track['entry_px']   = p['entry_px']
                         track['size']       = p['size']
                         track['margin']     = p['margin']
@@ -2271,7 +2306,7 @@ async def position_tracking_task(application: Application):
                         new_tracks[coin]    = track
 
                     else:
-                        # Nuova posizione rilevata — aggiungi al tracking
+                        # Nuova posizione — aggiungi al tracking
                         new_tracks[coin] = {
                             'entry_px':   p['entry_px'],
                             'is_long':    p['is_long'],
@@ -2281,27 +2316,26 @@ async def position_tracking_task(application: Application):
                             'dex':        p.get('dex', 'PERP'),
                             'unrealized': p['unrealized'],
                             'liq_px':     p['liq_px'],
-                            'alert_base': monitor.last_prices.get(p['coin'], p['entry_px']),  # prezzo corrente al rilevamento
+                            'alert_base': monitor.last_prices.get(coin, p['entry_px']),
                             'added_at':   datetime.now(),
                         }
                         logger.info(f"TRACK NEW {coin} ({'L' if p['is_long'] else 'S'}) -> chat {chat_id}")
-                        # Al primo ciclo dopo il boot non notificare (posizioni già aperte prima del riavvio)
-                        if chat_id in monitor._first_track_done:
-                            try:
-                                await application.bot.send_message(
-                                    chat_id=chat_id,
-                                    text=(
-                                        f"🎯 *Nuova posizione rilevata*\n\n"
-                                        f"{'📈 LONG' if p['is_long'] else '📉 SHORT'} *{coin}* "
-                                        f"_{p.get('dex','PERP')}_ {p['leverage']}x\n"
-                                        f"Entry: ${_fmt(p['entry_px'])}  Size: {abs(p['size'])}\n"
-                                        f"Margin: ${p['margin']:.2f}  Liq: ${_fmt(p['liq_px'])}\n"
-                                        f"Soglia alert: ±{threshold}%"
-                                    ),
-                                    parse_mode='Markdown'
-                                )
-                            except Exception as e:
-                                logger.error(f"Errore notifica nuova posizione {chat_id}: {e}")
+
+                        # Notifica sempre, anche al primo ciclo — vogliamo sapere le posizioni attive
+                        try:
+                            await application.bot.send_message(
+                                chat_id=chat_id,
+                                text=(
+                                    f"🎯 *{'Posizione attiva al boot' if is_first_cycle else 'Nuova posizione rilevata'}*\n\n"
+                                    f"{dir_s} *{coin}* {dex_s} {p['leverage']}x\n"
+                                    f"Entry: ${_fmt(p['entry_px'])}  Size: {abs(p['size'])}\n"
+                                    f"Margin: ${p['margin']:.2f}  Liq: ${_fmt(p['liq_px'])}\n"
+                                    f"Soglia alert: ±{threshold}%"
+                                ),
+                                parse_mode='Markdown'
+                            )
+                        except Exception as e:
+                            logger.error(f"Errore notifica posizione {chat_id}: {e}")
 
                 # Posizioni chiuse: erano in track ma non più nell'API
                 closed = set(current_tracks.keys()) - set(new_tracks.keys())
@@ -2310,8 +2344,8 @@ async def position_tracking_task(application: Application):
                     logger.info(f"TRACK CLOSED {coin} -> chat {chat_id}")
 
                     # Cancella automaticamente tutti gli ordini condizionali su questo simbolo
-                    conds         = monitor.conditional_orders.get(chat_id, {})
-                    removed_oids  = [oid for oid, o in conds.items() if o['coin'] == coin]
+                    conds        = monitor.conditional_orders.get(chat_id, {})
+                    removed_oids = [oid for oid, o in conds.items() if o['coin'] == coin]
                     for oid in removed_oids:
                         conds.pop(oid, None)
                     if removed_oids:
@@ -2320,11 +2354,13 @@ async def position_tracking_task(application: Application):
 
                     try:
                         cond_note = f"\n🗑 Rimossi {len(removed_oids)} ordini condizionali" if removed_oids else ""
+                        dir_s     = "LONG" if track['is_long'] else "SHORT"
+                        dex_s     = f"_{track['dex'].upper()}_" if track.get('dex') else "PERP"
                         await application.bot.send_message(
                             chat_id=chat_id,
                             text=(
                                 f"🏁 *Posizione chiusa*: *{coin}*\n"
-                                f"{'LONG' if track['is_long'] else 'SHORT'} _{track['dex']}_ {track['leverage']}x\n"
+                                f"{dir_s} {dex_s} {track['leverage']}x\n"
                                 f"Entry: ${_fmt(track['entry_px'])}\n"
                                 f"⏰ {datetime.now().strftime('%H:%M:%S')}{cond_note}"
                             ),
@@ -2333,6 +2369,7 @@ async def position_tracking_task(application: Application):
                     except Exception as e:
                         logger.error(f"Errore notifica chiusura {chat_id}: {e}")
 
+                # Marca questo chat come già passato per il primo ciclo
                 monitor._first_track_done.add(chat_id)
                 monitor.position_tracks[chat_id] = new_tracks
 
