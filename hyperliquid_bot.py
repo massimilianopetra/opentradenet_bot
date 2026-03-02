@@ -331,6 +331,67 @@ class HyperliquidPriceMonitor:
                     self.load_conditional_orders(int(chat_dir.name))
                 except Exception:
                     pass
+        # Arricchisce gli ordini senza is_long recuperando le posizioni dall'API
+        self._fix_missing_is_long()
+
+    def _fix_missing_is_long(self) -> None:
+        """
+        Per ogni ordine caricato senza campo is_long, recupera la direzione
+        dalla posizione aperta su Hyperliquid. Chiamato una volta al boot.
+        """
+        import requests as _req
+        for chat_id, conds in self.conditional_orders.items():
+            # Controlla se ci sono ordini senza is_long
+            needs_fix = [o for o in conds.values() if 'is_long' not in o]
+            if not needs_fix:
+                continue
+            # Recupera address del wallet
+            addr = None
+            try:
+                addr_file = DATA_DIR / 'wallet' / str(chat_id) / 'address.txt'
+                if addr_file.exists():
+                    addr = addr_file.read_text(encoding='utf-8').strip()
+            except Exception:
+                pass
+            if not addr:
+                # Nessun address: default is_long=True per sicurezza
+                for o in needs_fix:
+                    o['is_long'] = True
+                continue
+            # Fetch posizioni dal dex standard e xyz
+            pos_by_coin = {}
+            for dex in [''] + SUPPORTED_DEXS:
+                try:
+                    payload = {'type': 'clearinghouseState', 'user': addr}
+                    if dex:
+                        payload['dex'] = dex
+                    else:
+                        payload['type'] = 'clearinghouseState'
+                    resp  = _req.post('https://api.hyperliquid.xyz/info',
+                                      json=payload, timeout=8)
+                    state = resp.json()
+                    for ap in state.get('assetPositions', []):
+                        pos  = ap.get('position', {})
+                        szi  = float(pos.get('szi', 0))
+                        if szi == 0:
+                            continue
+                        coin = pos.get('coin', '').split(':')[-1]
+                        pos_by_coin[coin] = szi > 0  # True = long
+                except Exception as e:
+                    logger.warning(f"_fix_missing_is_long dex='{dex}': {e}")
+            # Applica is_long agli ordini
+            changed = False
+            for o in needs_fix:
+                coin = o.get('coin', '')
+                if coin in pos_by_coin:
+                    o['is_long'] = pos_by_coin[coin]
+                    logger.info(f"Ordine {coin} is_long={o['is_long']} recuperato da API")
+                else:
+                    o['is_long'] = True  # posizione non trovata: default long
+                    logger.warning(f"Posizione {coin} non trovata, is_long=True di default")
+                changed = True
+            if changed:
+                self.save_conditional_orders(chat_id)
 
     def get_threshold(self, chat_id: int) -> float:
         """Soglia subscribe per-utente, fallback a PRICE_CHANGE_THRESHOLD globale."""
@@ -2515,9 +2576,15 @@ async def price_polling_task(application: Application):
                         if o.get('snoozed_until') and now_ts < o['snoozed_until']:
                             continue
 
-                        # Costruisce testo alert
+                        # Costruisce testo alert — freccia dipende da tipo + direzione
                         t_label  = "🛑 Stop Loss" if is_sl else "🎯 Take Profit"
-                        arrow    = "🔽" if is_sl else "🔼"
+                        # LONG:  SL=🔽 (scende sotto), TP=🔼 (sale sopra)
+                        # SHORT: SL=🔼 (sale sopra),   TP=🔽 (scende sotto)
+                        if is_sl:
+                            arrow = "🔽" if is_long else "🔼"
+                        else:
+                            arrow = "🔼" if is_long else "🔽"
+                        dir_label = "LONG" if is_long else "SHORT"
                         dex_s    = f"_{o['dex'].upper()}_" if o['dex'] else "PERP"
                         size_s   = ""
                         if o.get('pct'):   size_s = f"  ({o['pct']*100:.0f}%)"
@@ -2549,7 +2616,7 @@ async def price_polling_task(application: Application):
                         now_str = datetime.now().strftime('%H:%M:%S')
                         txt = (
                             f"{t_label} — `{oid}`  _{now_str}_\n\n"
-                            f"{arrow} *{coin}* {dex_s}\n"
+                            f"{arrow} {dir_label} *{coin}* {dex_s}\n"
                             f"Trigger: ${_fmt(o['trigger_px'])}  Attuale: ${_fmt(current_px)}"
                             f"{pnl_line}{trailing_line}\n"
                             f"Azione: chiudi posizione{size_s}"
