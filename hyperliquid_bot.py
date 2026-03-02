@@ -155,6 +155,7 @@ class HyperliquidPriceMonitor:
         self.spike_subscribers: Set[int]             = set()  # chat_id iscritti a pricespike
         self.spike_prev_prices: Dict[str, float]     = {}     # prezzi poll precedente per pricespike
         self.last_snapshot_date: Optional[date]       = None   # data dell'ultimo snapshot giornaliero scritto
+        self._first_track_done: set                   = set()  # chat_id già passati per il primo ciclo tracking
         # Position tracking: {chat_id: {coin: {entry_px, is_long, size, margin, leverage, dex, alert_base, added_at}}}
         self.position_tracks:   Dict[int, Dict[str, dict]] = {}
         # Ordini in attesa di conferma: {chat_id: {action, coin, dex, is_buy, usd, expires_at}}
@@ -338,14 +339,17 @@ class HyperliquidPriceMonitor:
         """
         Per ogni ordine caricato senza campo is_long, recupera la direzione
         dalla posizione aperta su Hyperliquid. Chiamato una volta al boot.
+        Usa user_state per perp standard e clearinghouseState+dex per xyz.
         """
         import requests as _req
+        API = 'https://api.hyperliquid.xyz/info'
+
         for chat_id, conds in self.conditional_orders.items():
-            # Controlla se ci sono ordini senza is_long
             needs_fix = [o for o in conds.values() if 'is_long' not in o]
             if not needs_fix:
                 continue
-            # Recupera address del wallet
+
+            # Legge address
             addr = None
             try:
                 addr_file = DATA_DIR / 'wallet' / str(chat_id) / 'address.txt'
@@ -354,41 +358,55 @@ class HyperliquidPriceMonitor:
             except Exception:
                 pass
             if not addr:
-                # Nessun address: default is_long=True per sicurezza
                 for o in needs_fix:
                     o['is_long'] = True
                 continue
-            # Fetch posizioni dal dex standard e xyz
+
             pos_by_coin = {}
-            for dex in [''] + SUPPORTED_DEXS:
+
+            # 1) Perp standard — usa user_state
+            try:
+                resp  = _req.post(API, json={'type': 'clearinghouseState',
+                                             'user': addr}, timeout=8)
+                state = resp.json()
+                for ap in state.get('assetPositions', []):
+                    pos = ap.get('position', {})
+                    szi = float(pos.get('szi', 0))
+                    if szi == 0:
+                        continue
+                    coin = pos.get('coin', '').split(':')[-1]
+                    pos_by_coin[coin] = szi > 0
+                    logger.info(f"_fix_is_long PERP {coin}: szi={szi} is_long={szi>0}")
+            except Exception as e:
+                logger.warning(f"_fix_missing_is_long perp: {e}")
+
+            # 2) DEX xyz — usa clearinghouseState con dex
+            for dex in SUPPORTED_DEXS:
                 try:
-                    payload = {'type': 'clearinghouseState', 'user': addr}
-                    if dex:
-                        payload['dex'] = dex
-                    else:
-                        payload['type'] = 'clearinghouseState'
-                    resp  = _req.post('https://api.hyperliquid.xyz/info',
-                                      json=payload, timeout=8)
+                    resp  = _req.post(API, json={'type': 'clearinghouseState',
+                                                 'user': addr, 'dex': dex}, timeout=8)
                     state = resp.json()
                     for ap in state.get('assetPositions', []):
-                        pos  = ap.get('position', {})
-                        szi  = float(pos.get('szi', 0))
+                        pos = ap.get('position', {})
+                        szi = float(pos.get('szi', 0))
                         if szi == 0:
                             continue
                         coin = pos.get('coin', '').split(':')[-1]
-                        pos_by_coin[coin] = szi > 0  # True = long
+                        pos_by_coin[coin] = szi > 0
+                        logger.info(f"_fix_is_long {dex} {coin}: szi={szi} is_long={szi>0}")
                 except Exception as e:
-                    logger.warning(f"_fix_missing_is_long dex='{dex}': {e}")
-            # Applica is_long agli ordini
+                    logger.warning(f"_fix_missing_is_long dex={dex}: {e}")
+
+            # Applica is_long agli ordini e salva
             changed = False
             for o in needs_fix:
                 coin = o.get('coin', '')
                 if coin in pos_by_coin:
                     o['is_long'] = pos_by_coin[coin]
-                    logger.info(f"Ordine {coin} is_long={o['is_long']} recuperato da API")
+                    logger.info(f"Ordine {coin} ({o['type']}) is_long={o['is_long']}")
                 else:
-                    o['is_long'] = True  # posizione non trovata: default long
-                    logger.warning(f"Posizione {coin} non trovata, is_long=True di default")
+                    o['is_long'] = True
+                    logger.warning(f"Posizione {coin} non trovata nell'API, default is_long=True")
                 changed = True
             if changed:
                 self.save_conditional_orders(chat_id)
@@ -2267,21 +2285,23 @@ async def position_tracking_task(application: Application):
                             'added_at':   datetime.now(),
                         }
                         logger.info(f"TRACK NEW {coin} ({'L' if p['is_long'] else 'S'}) -> chat {chat_id}")
-                        try:
-                            await application.bot.send_message(
-                                chat_id=chat_id,
-                                text=(
-                                    f"🎯 *Nuova posizione rilevata*\n\n"
-                                    f"{'📈 LONG' if p['is_long'] else '📉 SHORT'} *{coin}* "
-                                    f"_{p.get('dex','PERP')}_ {p['leverage']}x\n"
-                                    f"Entry: ${p['entry_px']:,.2f}  Size: {abs(p['size'])}\n"
-                                    f"Margin: ${p['margin']:.2f}  Liq: ${p['liq_px']:,.2f}\n"
-                                    f"Soglia alert: ±{threshold}%"
-                                ),
-                                parse_mode='Markdown'
-                            )
-                        except Exception as e:
-                            logger.error(f"Errore notifica nuova posizione {chat_id}: {e}")
+                        # Al primo ciclo dopo il boot non notificare (posizioni già aperte prima del riavvio)
+                        if chat_id in monitor._first_track_done:
+                            try:
+                                await application.bot.send_message(
+                                    chat_id=chat_id,
+                                    text=(
+                                        f"🎯 *Nuova posizione rilevata*\n\n"
+                                        f"{'📈 LONG' if p['is_long'] else '📉 SHORT'} *{coin}* "
+                                        f"_{p.get('dex','PERP')}_ {p['leverage']}x\n"
+                                        f"Entry: ${_fmt(p['entry_px'])}  Size: {abs(p['size'])}\n"
+                                        f"Margin: ${p['margin']:.2f}  Liq: ${_fmt(p['liq_px'])}\n"
+                                        f"Soglia alert: ±{threshold}%"
+                                    ),
+                                    parse_mode='Markdown'
+                                )
+                            except Exception as e:
+                                logger.error(f"Errore notifica nuova posizione {chat_id}: {e}")
 
                 # Posizioni chiuse: erano in track ma non più nell'API
                 closed = set(current_tracks.keys()) - set(new_tracks.keys())
@@ -2313,6 +2333,7 @@ async def position_tracking_task(application: Application):
                     except Exception as e:
                         logger.error(f"Errore notifica chiusura {chat_id}: {e}")
 
+                monitor._first_track_done.add(chat_id)
                 monitor.position_tracks[chat_id] = new_tracks
 
         except Exception as e:
@@ -2469,8 +2490,22 @@ async def price_polling_task(application: Application):
                         is_sl = o['type'] == 'stoploss'
 
                         # Direzione della posizione (long o short)
-                        _track   = monitor.position_tracks.get(cid, {}).get(coin)
-                        is_long  = _track['is_long'] if _track else True
+                        # Priorità: 1) posizione tracciata in memoria (la più aggiornata)
+                        #            2) campo is_long salvato nell'ordine
+                        #            3) mai un default cieco — segnala il problema
+                        _track  = monitor.position_tracks.get(cid, {}).get(coin)
+                        if _track:
+                            is_long = _track['is_long']
+                            # Aggiorna anche l'ordine se non ce l'aveva
+                            if 'is_long' not in o:
+                                o['is_long'] = is_long
+                                monitor.save_conditional_orders(cid)
+                        elif 'is_long' in o:
+                            is_long = o['is_long']
+                        else:
+                            # Nessuna info disponibile — salta questo ciclo, riprova dopo
+                            logger.warning(f"is_long sconosciuto per {coin} ordine {oid} — skip")
+                            continue
 
                         # Verifica trigger — dipende dalla direzione della posizione:
                         # LONG:  TP scatta quando prezzo >= trigger, SL quando prezzo <= trigger
