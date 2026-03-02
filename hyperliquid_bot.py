@@ -1094,8 +1094,16 @@ def _next_cond_id() -> str:
 
 
 def _cond_label(order: dict) -> str:
-    t     = "🛑 SL" if order['type'] == 'stoploss' else "🎯 TP"
-    arrow = "≤" if order['type'] == 'stoploss' else "≥"
+    is_sl   = order['type'] == 'stoploss'
+    is_long = order.get('is_long', True)  # default long per ordini vecchi senza campo
+    t       = "🛑 SL" if is_sl else "🎯 TP"
+    # Freccia corretta per direzione + tipo:
+    # LONG:  SL ≤ trigger, TP ≥ trigger
+    # SHORT: SL ≥ trigger, TP ≤ trigger
+    if is_sl:
+        arrow = "≤" if is_long else "≥"
+    else:
+        arrow = "≥" if is_long else "≤"
     size_s = ""
     if order.get('pct'):
         size_s = f" {order['pct']*100:.0f}%"
@@ -1103,9 +1111,10 @@ def _cond_label(order: dict) -> str:
         size_s = f" ${order['usd']:,.0f}"
     else:
         size_s = " tutto"
-    coin   = order['coin']
-    dex_s  = f" _{order['dex'].upper()}_" if order['dex'] else " PERP"
-    return f"{t} *{coin}*{dex_s} {arrow} ${_fmt(order['trigger_px'])}{size_s}"
+    coin  = order['coin']
+    dex_s = f" _{order['dex'].upper()}_" if order['dex'] else " PERP"
+    dir_s = "L" if is_long else "S"
+    return f"{t}({dir_s}) *{coin}*{dex_s} {arrow} ${_fmt(order['trigger_px'])}{size_s}"
 
 
 async def stoploss_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1223,6 +1232,7 @@ async def _set_conditional(update: Update, context: ContextTypes.DEFAULT_TYPE, c
         'trigger_px':       trigger_px,
         'usd':              usd_amount,
         'pct':              pct,
+        'is_long':          is_long,   # direzione posizione al momento della creazione
         'created_at':       datetime.now(),
         'snoozed_until':    None,
         'alert_message_id': None,
