@@ -14,6 +14,8 @@ Supporta **perp standard**, **perp XYZ** (azioni, materie prime, forex, indici) 
 - **Trading via Telegram** — apri/chiudi posizioni long e short direttamente dalla chat, con conferma obbligatoria
 - **Gestione leva** — imposta la leva su qualsiasi simbolo (perp standard e XYZ)
 - **Storico prezzi** — snapshot giornaliero automatico su CSV
+- **Candele 15m** — salvataggio continuo su CSV per analisi tecnica
+- **Grafico candlestick** — visualizzazione locale con indicatori tecnici (`candle_chart.py`)
 - **Multi-mercato** — perp standard, XYZ (GOLD, SILVER, NFLX, ORCL…), spot
 - **Credenziali cifrate** — la private key API è salvata su disco con AES-128 (Fernet)
 
@@ -25,6 +27,8 @@ Supporta **perp standard**, **perp XYZ** (azioni, materie prime, forex, indici) 
 opentradenet_bot/
 ├── hyperliquid_bot.py      # Bot principale — comandi Telegram e polling
 ├── hl_wallet.py            # Gestione wallet, credenziali e client API Hyperliquid
+├── candle_chart.py         # Grafico candlestick locale da CSV candele
+├── generate_report.py      # Report HTML performance da CSV Hyperliquid
 ├── opentradenet.env        # Configurazione (non committare su git!)
 ├── opentradenet_bot.service # Unit systemd
 ├── data/
@@ -32,8 +36,11 @@ opentradenet_bot/
 │   │   └── {chat_id}/
 │   │       ├── address.txt  # Account address pubblico
 │   │       └── key.enc      # Private key cifrata con AES-128
-│   └── prices/
-│       └── {SIMBOLO}.csv    # Storico prezzi giornalieri
+│   ├── prices/
+│   │   └── {SIMBOLO}.csv    # Storico prezzi giornalieri
+│   └── candles/
+│       └── {SIMBOLO}/
+│           └── {SIMBOLO}_15m.csv  # Candele 15 minuti
 └── logs/
     └── hyperliquid_bot.log  # Log con rotazione giornaliera (7 giorni)
 ```
@@ -45,6 +52,12 @@ opentradenet_bot/
 ```bash
 pip install python-telegram-bot aiohttp python-dotenv cryptography \
             hyperliquid-python-sdk eth-account requests
+```
+
+Per `candle_chart.py` bastano `matplotlib` e `numpy` (nessuna dipendenza extra):
+
+```bash
+pip install matplotlib numpy
 ```
 
 Python 3.10+
@@ -76,6 +89,8 @@ POSITION_TRACK_INTERVAL=300              # secondi tra un aggiornamento posizion
 DATA_DIR=data
 PRICES_DIR=data/prices
 PRICES_TIME=9                            # ora dopo cui salvare snapshot giornaliero
+CANDLES_DIR=data/candles                 # directory candele 15m
+CANDLES_INTERVAL_SECS=900               # intervallo aggiornamento candele (default 15 min)
 LOG_DIR=logs
 LOG_LEVEL=INFO
 
@@ -84,6 +99,11 @@ WALLET_ENCRYPTION_KEY=                   # chiave Fernet AES-128 (44 caratteri b
 
 # Accesso ai comandi wallet/trading (lascia vuoto = tutti)
 WALLET_ALLOWED_CHATS=                    # es: 123456789,987654321
+
+# Ordini condizionali
+CONDITIONAL_SNOOZE_SECS=300             # silenziamento dopo "Salta" (default 5 min)
+CONDITIONAL_RENOTIFY_SECS=120           # intervallo re-notifica (default 2 min)
+CONDITIONAL_TP_TRAILING_PCT=0.5         # % ritracciamento dal picco per trailing TP automatico
 ```
 
 ### Generare la chiave di cifratura
@@ -137,89 +157,26 @@ sudo systemctl status opentradenet_bot
 | `/help` | Lista comandi |
 | `/price SIMBOLO` | Prezzo corrente di un simbolo (es. `/price BTC`) |
 | `/symbols` | Lista tutti i simboli disponibili |
-| `/symbols QUERY` | Cerca simboli (es. `/symbols sil` → trova SILVER) |
-| `/stats` | Statistiche del bot |
+| `/symbols QUERY` | Cerca simboli (es. `/symbols sil`) |
+| `/stats` | Statistiche bot (utenti, simboli, polling, log) |
 
 ---
 
-### Monitoraggio prezzi (Subscribe)
-
-Monitora un simbolo e ricevi alert quando il prezzo varia oltre la soglia impostata.
+### Monitoraggio prezzi
 
 | Comando | Descrizione |
 |---|---|
-| `/subscribe SIMBOLO` | Iscriviti agli alert di prezzo per un simbolo |
-| `/unsubscribe SIMBOLO` | Cancella iscrizione |
-| `/list` | Mostra subscribe attivi e posizioni in tracking |
-| `/threshold` | Mostra soglia alert attuale |
-| `/threshold 1.5` | Imposta soglia a ±1.5% |
-| `/threshold reset` | Ripristina soglia globale dal `.env` |
-
-**Come funziona:** il bot controlla ogni 10 secondi. Quando il prezzo varia di ±soglia% dal riferimento precedente, invia un alert. Il riferimento si aggiorna dopo ogni alert.
-
----
-
-### PriceSpike
-
-Alert su movimenti improvvisi da un poll al successivo (entità anomale, news, dump/pump).
-
-| Comando | Descrizione |
-|---|---|
-| `/pricespike` | Attiva/disattiva pricespike |
-| `/pricespike on` | Attiva |
-| `/pricespike off` | Disattiva |
-| `/pricespike 2.0` | Imposta soglia spike a ±2.0% per poll |
-| `/pricespike status` | Mostra stato e soglia |
-
-Monitora automaticamente tutti i simboli XYZ + i simboli extra configurati in `SPIKE_EXTRA_SYMBOLS`.
+| `/subscribe SIMBOLO` | Inizia a monitorare un simbolo |
+| `/unsubscribe SIMBOLO` | Smetti di monitorare |
+| `/list` | Lista delle tue sottoscrizioni attive |
+| `/threshold X` | Imposta soglia alert personale in % (es. `/threshold 1.5`) |
+| `/threshold reset` | Ripristina soglia globale |
+| `/pricespike N` | Attiva alert spike con soglia N% poll-to-poll |
+| `/pricespike status` | Mostra stato e soglia spike attuale |
 
 ---
 
-### Position Tracking
-
-Le posizioni aperte su Hyperliquid vengono rilevate automaticamente e monitorate. Non serve fare `/subscribe` manualmente.
-
-| Comando | Descrizione |
-|---|---|
-| `/trackpositions` | Mostra stato tracking |
-| `/trackpositions on` | Attiva tracking (default se address configurato) |
-| `/trackpositions off` | Disattiva tracking |
-
-**Come funziona:**
-- Ogni **5 minuti** — l'API viene interrogata per rilevare nuove posizioni o posizioni chiuse. Manda notifiche automatiche.
-- Ogni **10 secondi** — il prezzo corrente viene confrontato con il riferimento. Se varia oltre la soglia, arriva un alert arricchito (entry, PnL, distanza liquidazione).
-
-**Alert automatici:**
-
-```
-🎯 Nuova posizione rilevata
-📈 LONG GOLD _XYZ_ 5x
-Entry: $5,358.00  Size: 0.0037
-Margin: $21.43  Liq: $4,450.00
-Soglia alert: ±0.5%
-```
-
-```
-🎯 Position Alert — 14:23:10 (soglia ±0.5%)
-📈 GOLD LONG _XYZ_ 5x  size: 0.0037  ✅ a favore
-  Rif: $5,340.00  →  $5,367.00  (+0.51%)
-  Entry: $5,358.00  →  $5,367.00  (+0.17%)
-  PnL: +$0.03 (+0.1%)
-  Liq dist: 18.5%
-```
-
-```
-🏁 Posizione chiusa: GOLD
-LONG _XYZ_ 5x
-Entry: $5,358.00
-⏰ 19:56:22
-```
-
----
-
-### Wallet e credenziali
-
-Permette di collegare il tuo wallet Hyperliquid al bot per usare i comandi di trading.
+### Wallet
 
 | Comando | Descrizione |
 |---|---|
@@ -233,7 +190,7 @@ Permette di collegare il tuo wallet Hyperliquid al bot per usare i comandi di tr
 1. Vai su [app.hyperliquid.xyz/API](https://app.hyperliquid.xyz/API)
 2. Genera un nuovo API wallet → copia la private key
 3. Autorizza l'API wallet firmando la transazione
-4. Usa `/setaddress` per il tuo account address principale (42 caratteri, visibile in alto a destra)
+4. Usa `/setaddress` per il tuo account address principale (42 caratteri)
 5. Usa `/setkey` per la private key dell'API wallet
 
 La private key **non può prelevare fondi** — può solo aprire/chiudere posizioni.
@@ -284,42 +241,35 @@ Apri e chiudi posizioni direttamente dalla chat. **Gli importi sono sempre in do
 Importo: $500.00
 Prezzo attuale: $5,358.05
 Size stimata: 0.0933
-Invia /confirm per eseguire
-⏰ Scade in 30 secondi
+Invia /confirm per eseguire — scade in 30 secondi
 
 /confirm
 
 ✅ Ordine eseguito
-📈 LONG GOLD _XYZ_
-Size: 0.0933
-Prezzo: $5,360.00
-Importo: $500.00
-⏰ 19:56:16
+📈 LONG GOLD _XYZ_  Size: 0.0933  Prezzo: $5,360.00
 ```
 
-**Esempio chiusura parziale:**
-```
-/close GOLD 50%
+---
 
-⚠️ Conferma chiusura
-🔴 CLOSE GOLD _XYZ_
-Size da chiudere: 0.0466 (50% di 0.0933)
+### Position Tracking
 
-/confirm
+| Comando | Descrizione |
+|---|---|
+| `/positions` | Mostra posizioni aperte su Hyperliquid |
+| `/trackpositions` | Mostra stato tracking |
+| `/trackpositions on` | Attiva tracking automatico |
+| `/trackpositions off` | Disattiva tracking |
 
-✅ Ordine eseguito
-🔴 CLOSE GOLD _XYZ_
-Size: 0.0466
-⏰ 20:01:33
-```
-
-La leva usata è quella già configurata sul simbolo con `/setleverage`. Il mercato (PERP o XYZ) viene rilevato automaticamente.
+Il tracking verifica automaticamente ogni `POSITION_TRACK_INTERVAL` secondi le posizioni aperte e notifica:
+- nuove posizioni rilevate
+- posizioni chiuse (rimosse dall'API)
+- variazioni di prezzo oltre la soglia alert personale
 
 ---
 
 ### Ordini condizionali — Stop Loss e Take Profit
 
-Imposta soglie di prezzo su qualsiasi simbolo. Quando la condizione si verifica, il bot ti notifica ogni 10 secondi con bottoni di azione — **non esegue mai autonomamente**.
+Imposta soglie di prezzo su qualsiasi simbolo. Quando la condizione si verifica, il bot notifica ogni 10 secondi con bottoni di azione.
 
 | Comando | Descrizione |
 |---|---|
@@ -333,37 +283,19 @@ Imposta soglie di prezzo su qualsiasi simbolo. Quando la condizione si verifica,
 | `/cancelcond ID` | Cancella un ordine condizionale |
 | `/cancelcond all` | Cancella tutti gli ordini condizionali |
 
-**Esempio flusso stop loss:**
-```
-/stoploss GOLD 5100
-
-✅ Stop Loss impostato — ID: C0001
-GOLD _XYZ_  🔽 ≤  $5,100.00  (tutto)
-
-— quando GOLD scende sotto 5100 —
-
-🛑 Stop Loss — C0001
-
-🔽 GOLD _XYZ_
-Trigger: $5,100.00  Attuale: $5,092.00
-Azione: chiudi posizione (tutto)
-
-[ ✅ Esegui ]  [ ⏭ Salta (5 min) ]  [ 🗑 Cancella ordine ]
-```
-
 **Comportamento bottoni:**
 
 | Bottone | Effetto |
 |---|---|
 | ✅ Esegui | Esegue il close immediatamente e rimuove l'ordine |
-| ⏭ Salta (5 min) | Silenzia per 5 minuti — se il prezzo è ancora in zona riprende a chiedere |
+| ⏭ Salta (5 min) | Silenzia per 5 minuti — se il prezzo è ancora in zona riprende a notificare |
 | 🗑 Cancella ordine | Rimuove definitivamente l'ordine condizionale |
 
-> Il bot continua a notificare ad ogni poll (10s) finché non premi uno dei tre bottoni. Dopo "Salta" torna a notificare allo scadere del silenziamento se la condizione è ancora attiva.
+**Trailing Stop automatico per Take Profit:**
+Quando il TP è attivo e il prezzo supera il trigger, il bot traccia il picco e chiude automaticamente la posizione se il prezzo ritraccia di `CONDITIONAL_TP_TRAILING_PCT`% dal massimo (default 0.5%). In questo caso la chiusura avviene senza pressare bottoni.
 
-Variabile di configurazione nel `.env`:
 ```env
-CONDITIONAL_SNOOZE_SECS=300   # durata silenziamento dopo "Salta" (default 5 minuti)
+CONDITIONAL_TP_TRAILING_PCT=0.5   # % ritracciamento dal picco → chiusura automatica
 ```
 
 ---
@@ -398,9 +330,82 @@ CONDITIONAL_SNOOZE_SECS=300   # durata silenziamento dopo "Salta" (default 5 min
 |---|---|
 | `hyperliquid_bot.py` | Bot principale |
 | `hl_wallet.py` | Modulo wallet e client API |
+| `candle_chart.py` | Grafico candlestick locale da CSV candele (no pandas) |
+| `generate_report.py` | Report HTML performance da CSV Hyperliquid |
 | `opentradenet.env` | Configurazione (da non committare) |
 | `opentradenet_bot.service` | Unit systemd |
-| `generate_report.py` | Script standalone per report HTML delle performance da CSV Hyperliquid |
+
+---
+
+## Grafico candlestick — `candle_chart.py`
+
+Script standalone per visualizzare le candele 15m salvate dal bot. Non richiede pandas — usa solo `matplotlib` e `numpy`.
+
+### Struttura directory attesa
+
+Il file CSV viene cercato nei seguenti percorsi (in ordine di priorità):
+
+```
+data/candles/GOLD/GOLD_15m.csv    ← priorità
+data/candles/GOLD_15m.csv
+data/candles/GOLD/GOLD.csv
+data/candles/GOLD.csv
+```
+
+Formato CSV (quello prodotto dal bot):
+```
+timestamp,open,high,low,close,volume
+2026-03-01 14:00:00,5320.0,5325.5,5318.2,5322.8,45.12
+```
+
+### Uso
+
+```bash
+# Mostra finestra interattiva con le ultime 120 candele (~30h)
+python3 candle_chart.py GOLD
+
+# Specifica quante candele visualizzare
+python3 candle_chart.py GOLD --bars 200
+
+# Salva come PNG invece di aprire la finestra
+python3 candle_chart.py GOLD --save gold_chart.png
+
+# Directory CSV personalizzata
+python3 candle_chart.py GOLD --data-dir /altro/percorso/candles
+
+# Combinazioni
+python3 candle_chart.py SILVER --bars 96 --save silver_4h.png
+python3 candle_chart.py NFLX --bars 50 --data-dir /mnt/data/candles
+```
+
+### Argomenti
+
+| Argomento | Default | Descrizione |
+|---|---|---|
+| `symbol` | (obbligatorio) | Simbolo da graficare (es. GOLD, SILVER, BTC) |
+| `--bars N` | `120` | Numero di candele da visualizzare (≈ 30h a 15m) |
+| `--data-dir PATH` | `data/candles` | Directory base dei file CSV |
+| `--save FILE` | — | Salva PNG invece di aprire la finestra interattiva |
+
+### Indicatori inclusi
+
+- **Candele OHLC** colorate (verde rialzo / rosso ribasso)
+- **Bollinger Bands** (periodo 20, deviazione ×2)
+- **EMA 9** (giallo), **EMA 21** (rosso), **EMA 50** (azzurro)
+- **Supporti e resistenze automatici** da pivot locali (ultimi 4 per tipo)
+- **Volume** con media mobile a 20 periodi
+- **RSI 14** con zone overbought (>70) e oversold (<30)
+- **MACD** (12/26/9) con istogramma
+
+### Esempio output
+
+```
+📂 data/candles/GOLD/GOLD_15m.csv
+📊 Candele totali: 1538  |  Visualizzate: 120
+🕯 Da 2026-03-02 16:00:00  a  2026-03-03 21:45:00
+💰 Ultimo prezzo: 5084.4000
+✅ Salvato: gold_chart.png
+```
 
 ---
 
