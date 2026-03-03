@@ -12,6 +12,11 @@ import aiohttp
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from hl_wallet import WalletStore, HyperliquidClient, generate_encryption_key
+import tempfile
+import matplotlib
+matplotlib.use('Agg')   # ← fondamentale su server senza display
+import matplotlib.pyplot as plt
+import candle_chart as cc
 
 # ---------------------------------------------------------------------------
 # Configurazione ambiente
@@ -116,6 +121,7 @@ WALLET_ALLOWED_CHATS = {int(x.strip()) for x in os.getenv('WALLET_ALLOWED_CHATS'
 # Chiave di cifratura per le private key su disco (Fernet AES-128)
 # Se non presente nel .env viene generata automaticamente al primo avvio e stampata in log
 WALLET_ENCRYPTION_KEY = os.getenv('WALLET_ENCRYPTION_KEY', '')
+
 
 if not TELEGRAM_TOKEN:
     logger.error("❌ TELEGRAM_TOKEN non trovato nel file .env")
@@ -499,6 +505,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/takeprofit SYM PX [sz|%]  — imposta take profit\n"
         "/orders                    — ordini condizionali attivi\n"
         "/cancelcond ID|all         — cancella ordine condizionale\n"
+        "/chart SYM [N]            — grafico candele 15m\n"
         "/stats — statistiche bot\n"
         "/help — questo messaggio\n"
     )
@@ -885,6 +892,139 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(msg)
 
+# =============================================================================
+# PATCH — aggiungi /chart a hyperliquid_bot.py
+#
+# STEP 1 — Aggiungi questi import in cima al file, dopo gli import esistenti:
+#
+#   import tempfile
+#   import matplotlib
+#   matplotlib.use('Agg')   # backend non-interattivo, obbligatorio su server
+#   import matplotlib.pyplot as plt
+#   import candle_chart as cc
+#
+# STEP 2 — Incolla la funzione chart_command qui sotto nel bot,
+#           vicino agli altri comandi (es. dopo stats())
+#
+# STEP 3 — Registra il handler in main(), dopo la riga cancelcond:
+#
+#   app.add_handler(CommandHandler("chart", chart_command))
+#
+# STEP 4 — Aggiungi il comando alla lista in start() / help_command():
+#
+#   "/chart SYM [N]            — grafico candele 15m (es: /chart GOLD 96)\n"
+#
+# =============================================================================
+
+
+async def chart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /chart SIMBOLO [BARRE]
+    Genera e invia un grafico candlestick 15m del simbolo richiesto.
+
+    Esempi:
+        /chart GOLD          — ultime 120 candele (~30h)
+        /chart SILVER 96     — ultime 96 candele (~24h)
+        /chart BTC 200
+    """
+    chat_id = update.effective_chat.id
+
+    # ── Validazione argomenti ────────────────────────────────────────────
+    if not context.args:
+        await update.message.reply_text(
+            "📊 *Chart candlestick 15m*\n\n"
+            "Uso: `/chart SIMBOLO [BARRE]`\n\n"
+            "Esempi:\n"
+            "  `/chart GOLD`       — ultime 120 candele (~30h)\n"
+            "  `/chart SILVER 96`  — ultime 96 candele (~24h)\n"
+            "  `/chart BTC 200`",
+            parse_mode='Markdown'
+        )
+        return
+
+    symbol = context.args[0].upper()
+
+    bars = 120
+    if len(context.args) > 1:
+        try:
+            bars = int(context.args[1])
+            if bars < 10 or bars > 500:
+                await update.message.reply_text("❌ Numero barre deve essere tra 10 e 500.")
+                return
+        except ValueError:
+            await update.message.reply_text("❌ Numero barre non valido.")
+            return
+
+    # ── Controlla che il CSV esista ──────────────────────────────────────
+    try:
+        csv_path = cc.find_csv(symbol, Path(CANDLES_DIR))
+    except FileNotFoundError:
+        await update.message.reply_text(
+            f"❌ Nessuna candela disponibile per *{symbol}*.\n"
+            f"Il simbolo deve essere monitorato dal bot (presente in `data/candles/`).",
+            parse_mode='Markdown'
+        )
+        return
+
+    # ── Messaggio di attesa ──────────────────────────────────────────────
+    wait_msg = await update.message.reply_text(f"⏳ Generazione grafico *{symbol}*...",
+                                                parse_mode='Markdown')
+
+    tmp_path = None
+    try:
+        # ── Carica dati e genera grafico ─────────────────────────────────
+        data = cc.load_csv(csv_path, bars)
+        n    = len(data['closes'])
+
+        if n < 20:
+            await wait_msg.edit_text(
+                f"❌ Dati insufficienti per *{symbol}* ({n} candele disponibili, minimo 20).",
+                parse_mode='Markdown'
+            )
+            return
+
+        fig = cc.plot_chart(data, symbol)
+
+        # ── Salva in file temporaneo e invia ─────────────────────────────
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False, prefix=f'chart_{symbol}_') as tmp:
+            tmp_path = tmp.name
+
+        fig.savefig(tmp_path, dpi=120, bbox_inches='tight', facecolor='#0d1117')
+        plt.close(fig)
+
+        # Caption con info essenziali
+        last_close = data['closes'][-1]
+        change     = data['closes'][-1] - data['closes'][-2] if n > 1 else 0
+        change_pct = change / data['closes'][-2] * 100 if n > 1 else 0
+        arrow      = '▲' if change >= 0 else '▼'
+        caption = (
+            f"📊 *{symbol}* — 15m  |  {n} candele\n"
+            f"C: `{last_close:.2f}`  {arrow} `{abs(change):.2f}` (`{abs(change_pct):.2f}%`)\n"
+            f"Da: {data['dates'][0][:16]}  →  {data['dates'][-1][:16]}"
+        )
+
+        await wait_msg.delete()
+        await update.message.reply_photo(
+            photo=open(tmp_path, 'rb'),
+            caption=caption,
+            parse_mode='Markdown'
+        )
+        logger.info(f"Chart inviato: {symbol} {n} candele → chat {chat_id}")
+
+    except Exception as e:
+        logger.error(f"Errore chart {symbol} chat {chat_id}: {e}", exc_info=True)
+        try:
+            await wait_msg.edit_text(
+                f"❌ Errore nella generazione del grafico per *{symbol}*:\n`{e}`",
+                parse_mode='Markdown'
+            )
+        except Exception:
+            pass
+
+    finally:
+        # ── Pulizia file temporaneo ───────────────────────────────────────
+        if tmp_path:
+            Path(tmp_path).unlink(missing_ok=True)
 
 # ---------------------------------------------------------------------------
 # Snapshot giornaliero prezzi
@@ -2887,6 +3027,7 @@ def main():
     app.add_handler(CommandHandler("takeprofit",   takeprofit_command))
     app.add_handler(CommandHandler("orders",       orders_command))
     app.add_handler(CommandHandler("cancelcond",   cancelcond_command))
+    app.add_handler(CommandHandler("chart", chart_command))
 
     app.post_init     = post_init
     app.post_shutdown = post_shutdown
