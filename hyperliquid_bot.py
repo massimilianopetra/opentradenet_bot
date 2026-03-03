@@ -2571,17 +2571,17 @@ async def price_polling_task(application: Application):
                                 if peak is None or current_px > peak:
                                     o['tp_peak_price'] = current_px
                                     peak = current_px
-                                    logger.debug(f"TP TRAILING {coin} {oid} — nuovo picco LONG: ${peak:.4f}")
+                                    logger.info(f"TP TRAILING {coin} {oid} — nuovo picco LONG: ${peak:.4f}")
                                 retrace_pct = (peak - current_px) / peak * 100 if peak else 0
                             else:
                                 # Short: il picco è il minimo — aspettiamo che risalga
                                 if peak is None or current_px < peak:
                                     o['tp_peak_price'] = current_px
                                     peak = current_px
-                                    logger.debug(f"TP TRAILING {coin} {oid} — nuovo picco SHORT: ${peak:.4f}")
+                                    logger.info(f"TP TRAILING {coin} {oid} — nuovo picco SHORT: ${peak:.4f}")
                                 retrace_pct = (current_px - peak) / peak * 100 if peak else 0
 
-                            logger.debug(
+                            logger.info(
                                 f"TP TRAILING {coin} {oid} — "
                                 f"px=${current_px:.4f}  picco=${peak:.4f}  "
                                 f"retrace={retrace_pct:.3f}%  soglia={CONDITIONAL_TP_TRAILING_PCT}%"
@@ -2634,7 +2634,7 @@ async def price_polling_task(application: Application):
                         if not triggered:
                             # Uscito dalla zona: resetta picco e pulisci messaggio
                             if o.get('tp_peak_price') is not None:
-                                logger.debug(
+                                logger.info(
                                     f"TP TRAILING {coin} {oid} — "
                                     f"uscito dalla zona (px=${current_px:.4f} < trigger=${o['trigger_px']:.4f}), "
                                     f"picco resettato da ${o['tp_peak_price']:.4f}"
