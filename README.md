@@ -1,48 +1,37 @@
-# OpenTradeNet Bot
+# OpenTradeNet
 
-Bot Telegram per il monitoraggio dei prezzi e il trading su [Hyperliquid](https://hyperliquid.xyz), sviluppato in Python e pensato per girare come servizio su Ubuntu con systemd.
-
-Supporta **perp standard**, **perp XYZ** (azioni, materie prime, forex, indici) e **spot**.
+Bot Telegram per il monitoraggio prezzi e la gestione di posizioni su [Hyperliquid](https://hyperliquid.xyz) — mercati perpetual, XYZ e spot.
 
 ---
 
-## Funzionalità principali
-
-- **Monitoraggio prezzi** con alert su soglia personalizzata per ogni utente
-- **PriceSpike** — alert su movimenti improvvisi poll-to-poll
-- **Position Tracking automatico** — le tue posizioni aperte vengono monitorate in tempo reale senza configurazioni manuali
-- **Trading via Telegram** — apri/chiudi posizioni long e short direttamente dalla chat, con conferma obbligatoria
-- **Gestione leva** — imposta la leva su qualsiasi simbolo (perp standard e XYZ)
-- **Storico prezzi** — snapshot giornaliero automatico su CSV
-- **Candele 15m** — salvataggio continuo su CSV per analisi tecnica
-- **Grafico candlestick** — visualizzazione locale con indicatori tecnici (`candle_chart.py`)
-- **Multi-mercato** — perp standard, XYZ (GOLD, SILVER, NFLX, ORCL…), spot
-- **Credenziali cifrate** — la private key API è salvata su disco con AES-128 (Fernet)
-
----
-
-## Architettura
+## Struttura del progetto
 
 ```
-opentradenet_bot/
-├── hyperliquid_bot.py      # Bot principale — comandi Telegram e polling
-├── hl_wallet.py            # Gestione wallet, credenziali e client API Hyperliquid
-├── candle_chart.py         # Grafico candlestick locale da CSV candele
-├── generate_report.py      # Report HTML performance da CSV Hyperliquid
-├── opentradenet.env        # Configurazione (non committare su git!)
-├── opentradenet_bot.service # Unit systemd
+opentradenet/
+├── hyperliquid_bot.py           # Bot principale
+├── hl_wallet.py                 # Modulo wallet e client API
+├── candle_chart.py              # Grafico candlestick locale da CSV
+├── generate_report.py           # Report HTML performance
+├── fill_candles.py              # Riempie buchi nelle candele storiche
+├── ml_features.py               # Feature engineering ML (candele → dataset)
+├── opentradenet.env             # Configurazione (da non committare)
+├── opentradenet_bot.service     # Unit systemd
 ├── data/
 │   ├── wallet/
 │   │   └── {chat_id}/
-│   │       ├── address.txt  # Account address pubblico
-│   │       └── key.enc      # Private key cifrata con AES-128
+│   │       ├── address.txt      # Account address pubblico
+│   │       └── key.enc          # Private key cifrata con AES-128
 │   ├── prices/
-│   │   └── {SIMBOLO}.csv    # Storico prezzi giornalieri
+│   │   └── {SIMBOLO}.csv        # Storico prezzi giornalieri
 │   └── candles/
 │       └── {SIMBOLO}/
 │           └── {SIMBOLO}_15m.csv  # Candele 15 minuti
+├── ml_reports/                  # Output di ml_features.py
+│   ├── summary.txt              # Riepilogo tutti i simboli
+│   ├── {SIMBOLO}_features.png   # Grafici analisi feature
+│   └── {SIMBOLO}_dataset.csv    # Dataset pronto per training ML
 └── logs/
-    └── hyperliquid_bot.log  # Log con rotazione giornaliera (7 giorni)
+    └── hyperliquid_bot.log      # Log con rotazione giornaliera (7 giorni)
 ```
 
 ---
@@ -54,7 +43,7 @@ pip install python-telegram-bot aiohttp python-dotenv cryptography \
             hyperliquid-python-sdk eth-account requests
 ```
 
-Per `candle_chart.py` bastano `matplotlib` e `numpy` (nessuna dipendenza extra):
+Per `candle_chart.py` e `ml_features.py` bastano `matplotlib` e `numpy`:
 
 ```bash
 pip install matplotlib numpy
@@ -160,8 +149,6 @@ sudo systemctl status opentradenet_bot
 | `/symbols QUERY` | Cerca simboli (es. `/symbols sil`) |
 | `/stats` | Statistiche bot (utenti, simboli, polling, log) |
 
----
-
 ### Monitoraggio prezzi
 
 | Comando | Descrizione |
@@ -173,8 +160,6 @@ sudo systemctl status opentradenet_bot
 | `/threshold reset` | Ripristina soglia globale |
 | `/pricespike N` | Attiva alert spike con soglia N% poll-to-poll |
 | `/pricespike status` | Mostra stato e soglia spike attuale |
-
----
 
 ### Wallet
 
@@ -195,108 +180,24 @@ sudo systemctl status opentradenet_bot
 
 La private key **non può prelevare fondi** — può solo aprire/chiudere posizioni.
 
----
-
-### Leva
+### Posizioni e trading
 
 | Comando | Descrizione |
 |---|---|
-| `/setleverage SIMBOLO LEVA` | Imposta leva (auto-rileva mercato) |
-| `/setleverage SIMBOLO LEVA xyz` | Forza mercato XYZ |
-| `/setleverage SIMBOLO LEVA cross` | Usa cross margin invece di isolated |
-| `/setleverage SIMBOLO LEVA xyz cross` | XYZ + cross margin |
+| `/positions` | Posizioni aperte correnti |
+| `/posalert SIMBOLO X` | Alert se posizione varia ±X% |
+| `/buy SIMBOLO QTY [leverage]` | Apre long |
+| `/sell SIMBOLO QTY [leverage]` | Apre short |
+| `/close SIMBOLO` | Chiude posizione |
+| `/stoploss SIMBOLO PREZZO` | Imposta stop loss |
+| `/takeprofit SIMBOLO PREZZO` | Imposta take profit con trailing stop |
+| `/cancelcond SIMBOLO` | Cancella ordini condizionali attivi |
 
-**Esempi:**
-```
-/setleverage BTC 10          → PERP standard, isolated, 10x
-/setleverage GOLD 5          → XYZ auto-rilevato, isolated, 5x
-/setleverage NFLX 3 xyz      → XYZ esplicito, isolated, 3x
-/setleverage MSTR 5 xyz cross → XYZ, cross margin, 5x
-```
-
----
-
-### Trading
-
-Apri e chiudi posizioni direttamente dalla chat. **Gli importi sono sempre in dollari (notional)**, la size viene calcolata automaticamente sul prezzo corrente.
-
-> ⚠️ Ogni ordine richiede conferma con `/confirm` entro 30 secondi.
+### Grafici e analisi
 
 | Comando | Descrizione |
 |---|---|
-| `/long SIMBOLO IMPORTO` | Apre posizione long per $IMPORTO |
-| `/short SIMBOLO IMPORTO` | Apre posizione short per $IMPORTO |
-| `/close SIMBOLO` | Chiude tutta la posizione aperta |
-| `/close SIMBOLO 50%` | Chiude il 50% della posizione |
-| `/close SIMBOLO 200` | Chiude $200 di posizione |
-| `/confirm` | Conferma ed esegue l'ordine pendente |
-| `/cancelorder` | Annulla l'ordine pendente |
-
-**Esempio flusso long:**
-```
-/long GOLD 500
-
-⚠️ Conferma ordine
-📈 LONG GOLD _XYZ_
-Importo: $500.00
-Prezzo attuale: $5,358.05
-Size stimata: 0.0933
-Invia /confirm per eseguire — scade in 30 secondi
-
-/confirm
-
-✅ Ordine eseguito
-📈 LONG GOLD _XYZ_  Size: 0.0933  Prezzo: $5,360.00
-```
-
----
-
-### Position Tracking
-
-| Comando | Descrizione |
-|---|---|
-| `/positions` | Mostra posizioni aperte su Hyperliquid |
-| `/trackpositions` | Mostra stato tracking |
-| `/trackpositions on` | Attiva tracking automatico |
-| `/trackpositions off` | Disattiva tracking |
-
-Il tracking verifica automaticamente ogni `POSITION_TRACK_INTERVAL` secondi le posizioni aperte e notifica:
-- nuove posizioni rilevate
-- posizioni chiuse (rimosse dall'API)
-- variazioni di prezzo oltre la soglia alert personale
-
----
-
-### Ordini condizionali — Stop Loss e Take Profit
-
-Imposta soglie di prezzo su qualsiasi simbolo. Quando la condizione si verifica, il bot notifica ogni 10 secondi con bottoni di azione.
-
-| Comando | Descrizione |
-|---|---|
-| `/stoploss SIMBOLO PREZZO` | Alert quando prezzo ≤ PREZZO, chiudi tutto |
-| `/stoploss SIMBOLO PREZZO 200` | Alert quando prezzo ≤ PREZZO, chiudi $200 |
-| `/stoploss SIMBOLO PREZZO 50%` | Alert quando prezzo ≤ PREZZO, chiudi 50% |
-| `/takeprofit SIMBOLO PREZZO` | Alert quando prezzo ≥ PREZZO, chiudi tutto |
-| `/takeprofit SIMBOLO PREZZO 200` | Alert quando prezzo ≥ PREZZO, chiudi $200 |
-| `/takeprofit SIMBOLO PREZZO 50%` | Alert quando prezzo ≥ PREZZO, chiudi 50% |
-| `/orders` | Lista ordini condizionali attivi con ID |
-| `/cancelcond ID` | Cancella un ordine condizionale |
-| `/cancelcond all` | Cancella tutti gli ordini condizionali |
-
-**Comportamento bottoni:**
-
-| Bottone | Effetto |
-|---|---|
-| ✅ Esegui | Esegue il close immediatamente e rimuove l'ordine |
-| ⏭ Salta (5 min) | Silenzia per 5 minuti — se il prezzo è ancora in zona riprende a notificare |
-| 🗑 Cancella ordine | Rimuove definitivamente l'ordine condizionale |
-
-**Trailing Stop automatico per Take Profit:**
-Quando il TP è attivo e il prezzo supera il trigger, il bot traccia il picco e chiude automaticamente la posizione se il prezzo ritraccia di `CONDITIONAL_TP_TRAILING_PCT`% dal massimo (default 0.5%). In questo caso la chiusura avviene senza pressare bottoni.
-
-```env
-CONDITIONAL_TP_TRAILING_PCT=0.5   # % ritracciamento dal picco → chiusura automatica
-```
+| `/chart SIMBOLO [BARRE]` | Grafico candlestick 15m (es. `/chart GOLD 96`) |
 
 ---
 
@@ -332,6 +233,8 @@ CONDITIONAL_TP_TRAILING_PCT=0.5   # % ritracciamento dal picco → chiusura auto
 | `hl_wallet.py` | Modulo wallet e client API |
 | `candle_chart.py` | Grafico candlestick locale da CSV candele (no pandas) |
 | `generate_report.py` | Report HTML performance da CSV Hyperliquid |
+| `fill_candles.py` | Riempie buchi nelle candele storiche |
+| `ml_features.py` | Feature engineering ML su candele 15m |
 | `opentradenet.env` | Configurazione (da non committare) |
 | `opentradenet_bot.service` | Unit systemd |
 
@@ -343,8 +246,6 @@ Script standalone per visualizzare le candele 15m salvate dal bot. Non richiede 
 
 ### Struttura directory attesa
 
-Il file CSV viene cercato nei seguenti percorsi (in ordine di priorità):
-
 ```
 data/candles/GOLD/GOLD_15m.csv    ← priorità
 data/candles/GOLD_15m.csv
@@ -352,7 +253,7 @@ data/candles/GOLD/GOLD.csv
 data/candles/GOLD.csv
 ```
 
-Formato CSV (quello prodotto dal bot):
+Formato CSV:
 ```
 timestamp,open,high,low,close,volume
 2026-03-01 14:00:00,5320.0,5325.5,5318.2,5322.8,45.12
@@ -361,21 +262,10 @@ timestamp,open,high,low,close,volume
 ### Uso
 
 ```bash
-# Mostra finestra interattiva con le ultime 120 candele (~30h)
-python3 candle_chart.py GOLD
-
-# Specifica quante candele visualizzare
-python3 candle_chart.py GOLD --bars 200
-
-# Salva come PNG invece di aprire la finestra
-python3 candle_chart.py GOLD --save gold_chart.png
-
-# Directory CSV personalizzata
-python3 candle_chart.py GOLD --data-dir /altro/percorso/candles
-
-# Combinazioni
-python3 candle_chart.py SILVER --bars 96 --save silver_4h.png
-python3 candle_chart.py NFLX --bars 50 --data-dir /mnt/data/candles
+python3 candle_chart.py GOLD                          # ultime 120 candele (~30h)
+python3 candle_chart.py GOLD --bars 200               # candele personalizzate
+python3 candle_chart.py GOLD --save gold_chart.png    # salva PNG
+python3 candle_chart.py GOLD --data-dir /altro/path   # directory custom
 ```
 
 ### Argomenti
@@ -397,21 +287,11 @@ python3 candle_chart.py NFLX --bars 50 --data-dir /mnt/data/candles
 - **RSI 14** con zone overbought (>70) e oversold (<30)
 - **MACD** (12/26/9) con istogramma
 
-### Esempio output
-
-```
-📂 data/candles/GOLD/GOLD_15m.csv
-📊 Candele totali: 1538  |  Visualizzate: 120
-🕯 Da 2026-03-02 16:00:00  a  2026-03-03 21:45:00
-💰 Ultimo prezzo: 5084.4000
-✅ Salvato: gold_chart.png
-```
-
 ---
 
-## Report performance
+## Report performance — `generate_report.py`
 
-`generate_report.py` è uno script standalone (zero dipendenze extra) che genera un report HTML interattivo dal CSV della trade history esportato da Hyperliquid.
+Script standalone che genera un report HTML interattivo dal CSV della trade history esportato da Hyperliquid.
 
 ```bash
 python3 generate_report.py trade_history.csv
@@ -420,6 +300,173 @@ python3 generate_report.py trade_history.csv --open   # apre nel browser
 ```
 
 Il report include: P&L netto, win rate, profit factor, P&L per simbolo, split Long/Short e PERP/XYZ, timeline, tabella completa trade e posizioni ancora aperte.
+
+---
+
+## Fill candele — `fill_candles.py`
+
+Recupera le candele storiche mancanti da Hyperliquid e le aggiunge ai CSV esistenti senza toccare il bot.
+
+```bash
+python3 fill_candles.py                  # usa opentradenet.env, ultimi 14 giorni
+python3 fill_candles.py --days 30        # recupera fino a 30 giorni fa
+python3 fill_candles.py --symbol BTC     # solo un simbolo
+python3 fill_candles.py --dry-run        # mostra buchi senza scrivere
+```
+
+---
+
+## ML Feature Engineering — `ml_features.py`
+
+Script standalone che legge i CSV candele 15m e produce un dataset con **48 feature tecniche + label** pronto per il training di modelli ML (XGBoost, Random Forest ecc.).
+
+Non richiede dipendenze nuove — usa solo `matplotlib` e `numpy` già presenti nel progetto. Tutti gli indicatori sono implementati in Python puro.
+
+### A cosa serve
+
+`ml_features.py` è il primo passo del pipeline ML. **Non produce segnali di trading** — analizza lo storico candele e risponde alla domanda:
+
+> *"Quando il prezzo è poi salito/sceso di almeno X% nelle 4 ore successive, cosa stavano facendo gli indicatori in quel momento?"*
+
+L'output (grafici + dataset CSV) serve a capire quali feature sono predittive su ogni simbolo, e a preparare i dati per allenare un modello che in futuro manderà alert Telegram LONG/SHORT.
+
+### Uso rapido
+
+```bash
+# Tutti i simboli — soglia automatica — solo testo (CONSIGLIATO per 300+ simboli)
+python3 ml_features.py --horizon 16 --auto-threshold --no-charts --quiet
+
+# Come sopra + salva dataset CSV per il training ML
+python3 ml_features.py --horizon 16 --auto-threshold --no-charts --quiet --save-csv
+
+# Solo un simbolo con grafici
+python3 ml_features.py --symbol BTC --horizon 16 --auto-threshold
+
+# Soglia manuale fissa per tutti i simboli
+python3 ml_features.py --horizon 16 --threshold 0.015
+```
+
+### Argomenti
+
+| Argomento | Default | Descrizione |
+|---|---|---|
+| `--data-dir PATH` | `data/candles` | Directory base dei CSV candele |
+| `--symbol SYM` | — | Processa solo questo simbolo |
+| `--horizon N` | `4` | Candele future per il label (N × 15min = orizzonte previsione) |
+| `--threshold F` | `0.003` | Soglia manuale % per LONG/SHORT (es. `0.015` = 1.5%) |
+| `--auto-threshold` | off | Calcola soglia adattiva per simbolo (target ~62% NEUTRO) |
+| `--save-csv` | off | Salva dataset in `ml_reports/SIMBOLO_dataset.csv` |
+| `--no-charts` | off | Non generare PNG (molto più veloce su 300+ simboli) |
+| `--quiet` | off | Output minimale: una riga per simbolo + tabella finale |
+
+### Horizon — come si calcola
+
+L'horizon è espresso in **numero di candele**, non in ore. Con candele a 15 minuti:
+
+```
+--horizon 4   →   1 ora avanti
+--horizon 8   →   2 ore avanti
+--horizon 16  →   4 ore avanti  (consigliato)
+--horizon 32  →   8 ore avanti
+--horizon 96  →  24 ore avanti
+
+Formula: ore desiderate × 4 = horizon
+```
+
+### Label
+
+Per ogni candela all'istante T, il label guarda il prezzo a T+horizon:
+
+```
+future_return = (close[T+horizon] - close[T]) / close[T]
+
+label = +1  (LONG)   se future_return > +soglia
+label = -1  (SHORT)  se future_return < -soglia
+label =  0  (NEUTRO) altrimenti
+```
+
+La distribuzione ottimale è circa **62% NEUTRO, 19% LONG, 19% SHORT**. Con `--auto-threshold` la soglia viene calcolata automaticamente per ogni simbolo per avvicinarsi a questo target — necessario perché crypto e azionari hanno volatilità molto diverse.
+
+### Feature calcolate (48 totali)
+
+**Struttura candela corrente (6):** `body_ratio`, `upper_wick_ratio`, `lower_wick_ratio`, `close_position`, `is_bullish`, `range_pct`
+
+**Momentum (3):** `ret_1`, `ret_3`, `ret_5` — return % su 1, 3, 5 candele passate
+
+**Indicatori tecnici (10):** distanza % da EMA9/21/50, cross EMA9 vs EMA21, posizione nelle BB, larghezza BB, RSI 14, MACD histogram, variazione MACD histogram, ATR %
+
+**Volume (2):** `vol_ratio` (vs SMA20), `vol_ratio_5` (vs SMA5)
+
+**Sequenza (5):** direzione ultime 3 candele, candele consecutive rialziste/ribassiste
+
+**Pattern candlestick (18):**
+- Singola candela: `pat_doji`, `pat_hammer`, `pat_inverted_hammer`, `pat_marubozu_bull`, `pat_marubozu_bear`, `pat_spinning_top`
+- Due candele: `pat_engulfing_bull`, `pat_engulfing_bear`, `pat_harami_bull`, `pat_harami_bear`, `pat_tweezer_bottom`, `pat_tweezer_top`, `pat_piercing_line`, `pat_dark_cloud_cover`
+- Tre candele: `pat_morning_star`, `pat_evening_star`, `pat_three_white_soldiers`, `pat_three_black_crows`
+
+**Contesto temporale (4):** ora UTC e giorno della settimana codificati ciclicamente (sin/cos)
+
+### Output prodotto
+
+Tutti i file vengono salvati in `ml_reports/`:
+
+| File | Descrizione |
+|---|---|
+| `summary.txt` | Tabella riepilogativa di tutti i simboli: campioni, % LONG/SHORT/NEUTRO, soglia usata, top feature |
+| `SIMBOLO_features.png` | Grafici analisi (6 pannelli, vedi sotto) |
+| `SIMBOLO_dataset.csv` | Dataset pronto per training ML (con `--save-csv`) |
+
+### Grafici — cosa leggere
+
+I grafici PNG (generati senza `--no-charts`) mostrano 6 pannelli:
+
+**Pannello 1 — Distribuzione label (torta):** mostra se il simbolo è bilanciato tra LONG/SHORT/NEUTRO. Un forte squilibrio (es. LONG 35% SHORT 8%) indica un bias storico rialzista — il modello ne terrà conto.
+
+**Pannello 2 — Istogramma return futuro:** la forma della curva indica quanto è prevedibile il simbolo. Una campana larga con due gobbe è più favorevole al ML di una campana stretta centrata sullo zero.
+
+**Pannello 3 — RSI medio per label:** se LONG ha RSI basso e SHORT ha RSI alto, la strategia oversold/overbought funziona su quel simbolo. Se i valori sono simili, RSI non è predittivo.
+
+**Pannello 4 — Posizione BB per label:** se LONG ha `bb_position` bassa (vicino alla banda inferiore) il simbolo è mean-reverting. Se LONG ha `bb_position` alta, è momentum/breakout. Cambia tutto nell'approccio al trading.
+
+**Pannello 5 — Volume ratio per label:** se i movimenti forti (LONG/SHORT) hanno volume ratio alto e NEUTRO ha volume basso, il volume è un filtro affidabile anche per il trading manuale.
+
+**Pannello 6 — Pannello 6 — Correlazioni feature → label:** il pannello più importante. Mostra quali dei 48 indicatori sono più predittivi su quel simbolo specifico. Il segno indica la direzione: correlazione negativa su RSI significa "RSI alto → short, RSI basso → long". Usalo per capire la "personalità" del simbolo.
+
+### Esempio output `--quiet`
+
+```
+  [  1/300]  AAPL         elapsed=0s   ETA=120s
+  [ 10/300]  BTC          elapsed=12s  ETA=108s
+  ...
+  ────────────────────────────────────────────────────────────
+  SIMBOLO      CAMPIONI   LONG%  SHORT%  NEUTRO%  SOGLIA
+  AAPL             1640   19.1%   18.8%    62.1%   1.23%
+  BTC              1650   19.4%   19.2%    61.4%   2.87%
+  HYPE             1645   18.9%   19.3%    61.8%   1.91%
+  INTC             1638   19.0%   19.1%    61.9%   0.87%
+  ...
+  ════════════════════════════════════════════════════════════
+  ✅ Completato in 87.3s
+  Simboli OK : 298
+```
+
+### Note tecniche
+
+- Il file usa `matplotlib.use('Agg')` per funzionare correttamente come servizio systemd senza display
+- Il path `data/candles` viene risolto relativamente alla posizione dello script (compatibile con systemd)
+- Tutti gli indicatori (EMA, RSI, MACD, BB, ATR) sono implementati in Python puro — numpy usato solo dove richiesto da matplotlib
+- I pattern candlestick sono tutti binari (0/1) e non richiedono librerie esterne come `ta-lib`
+- Con `--no-charts --quiet` il tempo di esecuzione su 300 simboli è tipicamente 1-3 minuti
+
+---
+
+## Trailing stop automatico
+
+Il take profit supporta un trailing stop opzionale: quando il prezzo supera il target e poi ritraccia della percentuale configurata, la posizione viene chiusa automaticamente senza intervento manuale.
+
+```env
+CONDITIONAL_TP_TRAILING_PCT=0.5   # % ritracciamento dal picco → chiusura automatica
+```
 
 ---
 
