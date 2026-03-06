@@ -74,7 +74,9 @@ warnings.filterwarnings('ignore')
 DEFAULT_DATA_DIR  = 'data/candles'
 DEFAULT_HORIZON   = 4          # candele future da guardare per il label (4 × 15min = 1 ora)
 DEFAULT_THRESHOLD = 0.003      # 0.3% — soglia per definire LONG/SHORT vs NEUTRO
-AUTO_THRESHOLD_NEUTRO_TARGET = 0.62   # target % NEUTRO con --auto-threshold
+# Target NEUTRO alto: vogliamo pochi segnali ma precisi.
+# 75% NEUTRO → ~12.5% LONG, ~12.5% SHORT — il modello segnala solo i movimenti forti.
+AUTO_THRESHOLD_NEUTRO_TARGET = 0.75
 OUTPUT_DIR        = Path('ml_reports')
 
 # ---------------------------------------------------------------------------
@@ -507,11 +509,13 @@ def build_features(data: dict, horizon: int = 4, threshold: float = 0.003) -> li
       - hour_sin, hour_cos   : ora UTC codificata ciclicamente (0-23)
       - weekday_sin, weekday_cos : giorno settimana codificato ciclicamente (0-6)
 
-    LABEL:
-      - label  : +1 (LONG) se return futuro > +threshold
-                  -1 (SHORT) se return futuro < -threshold
-                   0 (NEUTRO) altrimenti
-      - future_return_pct : return % effettivo nelle prossime 'horizon' candele
+    LABEL (Favorable Excursion):
+      - label  : +1 (LONG)   se il prezzo sale oltre +threshold nelle prossime
+                              'horizon' candele SENZA prima scendere oltre -threshold/2
+                  -1 (SHORT)  se il prezzo scende oltre -threshold SENZA prima salire
+                              oltre +threshold/2
+                   0 (NEUTRO) movimento ambiguo o laterale
+      - future_return_pct : return % semplice close→close (per analisi, non usato nel label)
     """
     closes    = data['closes']
     opens     = data['opens']
@@ -625,15 +629,37 @@ def build_features(data: dict, horizon: int = 4, threshold: float = 0.003) -> li
         weekday_sin  = math.sin(2 * math.pi * weekday / 7)
         weekday_cos  = math.cos(2 * math.pi * weekday / 7)
 
-        # ── Label ─────────────────────────────────────────────────────────
+        # ── Label (Favorable Excursion) ───────────────────────────────────
+        # Invece di guardare solo close[T+horizon], usiamo il massimo e
+        # minimo realmente toccati nelle prossime 'horizon' candele.
+        #
+        # LONG  : il prezzo sale oltre +threshold SENZA prima scendere
+        #         oltre -threshold/2  (movimento pulito verso l'alto)
+        # SHORT : il prezzo scende oltre -threshold SENZA prima salire
+        #         oltre +threshold/2  (movimento pulito verso il basso)
+        # NEUTRO: tutto il resto — oscillazioni laterali o movimenti
+        #         ambigui che toccherebbero sia stop che target
+        #
+        # Questo label è più realistico del semplice return finale:
+        # cattura se il trade avrebbe funzionato davvero, non solo
+        # dove si trova il prezzo alla candela N.
+        future_highs  = highs[i+1 : i+1+horizon]
+        future_lows   = lows[i+1  : i+1+horizon]
+        max_excursion = (max(future_highs) - c) / c   # max rialzo raggiunto
+        min_excursion = (min(future_lows)  - c) / c   # max ribasso raggiunto
+
+        half = threshold * 0.8   # tolleranza contro-movimento (80% della soglia)
+
+        if max_excursion > threshold and min_excursion > -half:
+            label = 1    # LONG pulito
+        elif min_excursion < -threshold and max_excursion < half:
+            label = -1   # SHORT pulito
+        else:
+            label = 0    # NEUTRO / ambiguo
+
+        # future_return_pct rimane il return semplice (per analisi)
         future_close  = closes[i + horizon]
         future_return = (future_close - c) / c
-        if future_return > threshold:
-            label = 1    # LONG
-        elif future_return < -threshold:
-            label = -1   # SHORT
-        else:
-            label = 0    # NEUTRO
 
         rows.append({
             # Metadati
@@ -690,37 +716,48 @@ def build_features(data: dict, horizon: int = 4, threshold: float = 0.003) -> li
 # ---------------------------------------------------------------------------
 
 def compute_auto_threshold(closes: list, horizon: int,
+                            highs: list = None, lows: list = None,
                             target_neutro: float = AUTO_THRESHOLD_NEUTRO_TARGET) -> float:
     """
     Calcola automaticamente la soglia ottimale per un simbolo in modo che
     la percentuale di campioni NEUTRO sia vicina a target_neutro (default 62%).
 
-    Strategia: usa il percentile dei ritorni assoluti futuri.
-    - Calcola tutti i ritorni |close[i+horizon] - close[i]| / close[i]
-    - Prende il percentile corrispondente a target_neutro
-      (es. target=62% → percentile 19° dei ritorni = soglia tale che
-       il 38% dei casi supera la soglia in un senso o nell'altro)
+    Con il favorable excursion label, usa il massimo movimento direzionale
+    pulito: max(high[i+1..i+horizon]) - close[i] per i rialzi,
+    close[i] - min(low[i+1..i+horizon]) per i ribassi.
+    Prende il minore dei due come escursione favorevole per ogni candela.
 
-    In pratica: soglia = percentile((1 - target_neutro) / 2 * 100)
-    dei ritorni assoluti — così il 19% va LONG, 19% SHORT, 62% NEUTRO.
+    Se highs/lows non sono disponibili, ricade sul semplice |close-to-close|.
 
     Restituisce la soglia come float (es. 0.018 = 1.8%).
     """
     n = len(closes)
-    abs_returns = []
-    for i in range(n - horizon):
-        if closes[i] > 0:
-            abs_returns.append(abs(closes[i + horizon] - closes[i]) / closes[i])
+    excursions = []
 
-    if not abs_returns:
+    if highs and lows and len(highs) == n and len(lows) == n:
+        # Favorable excursion: usa high/low futuri
+        for i in range(n - horizon):
+            if closes[i] <= 0:
+                continue
+            c = closes[i]
+            max_up   = (max(highs[i+1 : i+1+horizon]) - c) / c
+            max_down = (c - min(lows[i+1  : i+1+horizon])) / c
+            # Usa il minore: rappresenta il "segnale più difficile da raggiungere"
+            excursions.append(min(max_up, max_down))
+    else:
+        # Fallback: close-to-close
+        for i in range(n - horizon):
+            if closes[i] > 0:
+                excursions.append(abs(closes[i + horizon] - closes[i]) / closes[i])
+
+    if not excursions:
         return DEFAULT_THRESHOLD
 
-    abs_returns.sort()
-    # percentile = target_neutro (es. 62° percentile dei ritorni assoluti)
-    # → il 62% dei movimenti è SOTTO questa soglia → 62% NEUTRO
-    idx = int(len(abs_returns) * target_neutro)
-    idx = max(0, min(idx, len(abs_returns) - 1))
-    threshold = abs_returns[idx]
+    excursions.sort()
+    # percentile corrispondente a target_neutro
+    idx = int(len(excursions) * target_neutro)
+    idx = max(0, min(idx, len(excursions) - 1))
+    threshold = excursions[idx]
 
     # Clamp ragionevole: mai sotto 0.1% né sopra 10%
     threshold = max(0.001, min(0.10, threshold))
@@ -1078,7 +1115,10 @@ def process_symbol(args_tuple):
 
         # Auto-threshold: calcola soglia adattiva per questo simbolo
         if auto_threshold:
-            threshold = compute_auto_threshold(raw_data['closes'], horizon)
+            threshold = compute_auto_threshold(
+                raw_data['closes'], horizon,
+                highs=raw_data['highs'], lows=raw_data['lows']
+            )
 
         if not quiet:
             print(f"  🔄 {sym:<12} ({n_candles} candele)  soglia={threshold*100:.2f}%")

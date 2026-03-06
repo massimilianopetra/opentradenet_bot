@@ -1,0 +1,173 @@
+{
+  "symbol": "EWJ",
+  "trained_at": "2026-03-06 16:55:44 UTC",
+  "feature_names": [
+    "body_ratio",
+    "upper_wick_ratio",
+    "lower_wick_ratio",
+    "close_position",
+    "is_bullish",
+    "range_pct",
+    "ret_1",
+    "ret_3",
+    "ret_5",
+    "dist_ema9_pct",
+    "dist_ema21_pct",
+    "dist_ema50_pct",
+    "ema9_vs_ema21",
+    "bb_position",
+    "bb_width_pct",
+    "rsi",
+    "macd_hist",
+    "macd_hist_change",
+    "atr_pct",
+    "vol_ratio",
+    "vol_ratio_5",
+    "prev1_bullish",
+    "prev2_bullish",
+    "prev3_bullish",
+    "consec_bullish",
+    "consec_bearish",
+    "pat_doji",
+    "pat_hammer",
+    "pat_inverted_hammer",
+    "pat_marubozu_bull",
+    "pat_marubozu_bear",
+    "pat_spinning_top",
+    "pat_engulfing_bull",
+    "pat_engulfing_bear",
+    "pat_harami_bull",
+    "pat_harami_bear",
+    "pat_tweezer_bottom",
+    "pat_tweezer_top",
+    "pat_piercing_line",
+    "pat_dark_cloud_cover",
+    "pat_morning_star",
+    "pat_evening_star",
+    "pat_three_white_soldiers",
+    "pat_three_black_crows",
+    "hour_sin",
+    "hour_cos",
+    "weekday_sin",
+    "weekday_cos"
+  ],
+  "n_features": 48,
+  "horizon": null,
+  "threshold": null,
+  "metrics": {
+    "accuracy": 0.5517,
+    "mean_confidence": 0.5983999967575073,
+    "n_test": 58,
+    "per_class": {
+      "-1": {
+        "precision": 0.3077,
+        "recall": 1.0,
+        "f1": 0.4706,
+        "support": 8
+      },
+      "0": {
+        "precision": 0.619,
+        "recall": 0.4333,
+        "f1": 0.5098,
+        "support": 30
+      },
+      "1": {
+        "precision": 1.0,
+        "recall": 0.55,
+        "f1": 0.7097,
+        "support": 20
+      }
+    }
+  },
+  "feature_importance": [
+    [
+      "rsi",
+      2.7514
+    ],
+    [
+      "bb_position",
+      2.7302
+    ],
+    [
+      "weekday_cos",
+      2.3957
+    ],
+    [
+      "dist_ema21_pct",
+      2.2842
+    ],
+    [
+      "hour_sin",
+      2.2142
+    ],
+    [
+      "weekday_sin",
+      2.1695
+    ],
+    [
+      "dist_ema50_pct",
+      2.1316
+    ],
+    [
+      "hour_cos",
+      1.987
+    ],
+    [
+      "bb_width_pct",
+      1.6816
+    ],
+    [
+      "atr_pct",
+      1.4537
+    ],
+    [
+      "dist_ema9_pct",
+      1.4003
+    ],
+    [
+      "macd_hist_change",
+      1.3356
+    ],
+    [
+      "macd_hist",
+      1.3289
+    ],
+    [
+      "ret_5",
+      1.2725
+    ],
+    [
+      "ema9_vs_ema21",
+      1.2704
+    ],
+    [
+      "vol_ratio_5",
+      1.2482
+    ],
+    [
+      "ret_3",
+      1.1753
+    ],
+    [
+      "consec_bearish",
+      1.1597
+    ],
+    [
+      "vol_ratio",
+      0.9811
+    ]
+  ],
+  "weak_model": false,
+  "xgboost_params": {
+    "max_depth": 3,
+    "n_estimators": 400,
+    "learning_rate": 0.03,
+    "subsample": 0.7,
+    "colsample_bytree": 0.6,
+    "min_child_weight": 20,
+    "gamma": 0.5,
+    "reg_alpha": 0.5,
+    "reg_lambda": 3.0,
+    "random_state": 42
+  }
+}
