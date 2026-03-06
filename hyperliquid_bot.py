@@ -1407,8 +1407,11 @@ async def _set_conditional(update: Update, context: ContextTypes.DEFAULT_TYPE, c
         )
         return
 
-    is_long    = track['is_long']
-    current_px = monitor.last_prices.get(symbol, track['entry_px'])
+    is_long      = track['is_long']
+    price_result = await monitor.get_price(symbol)
+    current_px   = price_result[0] if price_result else monitor.last_prices.get(symbol, track['entry_px'])
+
+    # Validazione direzione trigger
 
     # Validazione direzione trigger
     if ctype == 'stoploss':
