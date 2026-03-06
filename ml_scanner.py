@@ -615,10 +615,15 @@ def format_alert(result: dict) -> str:
 
     # Target e stop
     if result['target'] and result['stop']:
-        dir_sign = '+' if dirn == 'LONG' else '-'
+        if dirn == 'LONG':
+            target_sign = '+'
+            stop_sign   = '-'
+        else:
+            target_sign = '-'
+            stop_sign   = '+'
         lines += [
-            f"🎯 Target:  {_fmt_price(result['target'])}  ({dir_sign}{result['target_pct']:.1f}%)",
-            f"🛑 Stop:    {_fmt_price(result['stop'])}  (-{result['stop_pct']:.1f}%)",
+            f"🎯 Target:  {_fmt_price(result['target'])}  ({target_sign}{result['target_pct']:.1f}%)",
+            f"🛑 Stop:    {_fmt_price(result['stop'])}  ({stop_sign}{result['stop_pct']:.1f}%)",
             f"📊 R/R:     1 : {result['rr_ratio']:.1f}",
             "",
         ]
