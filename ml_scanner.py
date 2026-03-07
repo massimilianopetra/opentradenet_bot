@@ -470,8 +470,8 @@ def get_context(data, i):
         ctx_score += 8
         ctx_desc.append("🗜️ BB Squeeze — volatilità compressa")
 
-    if   ema_trend == 'strong_up':   ctx_score += 8;  ctx_desc.append("📈 Trend forte rialzista (EMA9>21>50)")
-    elif ema_trend == 'strong_down': ctx_score += 8;  ctx_desc.append("📉 Trend forte ribassista (EMA9<21<50)")
+    if   ema_trend == 'strong_up':   ctx_score += 8;  ctx_desc.append("📈 Trend forte rialzista (EMA9&gt;21&gt;50)")
+    elif ema_trend == 'strong_down': ctx_score += 8;  ctx_desc.append("📉 Trend forte ribassista (EMA9&lt;21&lt;50)")
     elif ema_trend in ('up', 'down'): ctx_score += 4
 
     if ema_cross == 'bull_cross':
