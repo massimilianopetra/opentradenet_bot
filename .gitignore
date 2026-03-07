@@ -22,6 +22,7 @@ var/
 wheels/
 logs/
 data/
+models/
 ml_reports/
 share/python-wheels/
 *.egg-info/
