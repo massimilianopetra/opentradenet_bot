@@ -399,6 +399,64 @@ def detect_vsa_patterns(data, i):
                 'desc': f'No Demand — vol {vol_ratio:.2f}× in uptrend → assenza domanda, debolezza',
             })
 
+    # ── 5. TEST (pullback su supporto in uptrend con volume basso) ────────
+    # Logica: siamo in uptrend, il prezzo scende su un minimo recente ma il
+    # volume è basso (nessuno vuole vendere davvero) e il close rimane nella
+    # metà superiore del range → il trend riprende. Segnale con-trend LONG.
+    if i >= 10 and vol_pct <= 0.35 and close_pos >= 0.50:
+        ema9_vals  = _ema(closes, 9)
+        ema21_vals = _ema(closes, 21)
+        in_uptrend = (ema9_vals[i] and ema21_vals[i] and
+                      ema9_vals[i] > ema21_vals[i] and
+                      closes[i] > ema21_vals[i])
+        # Il prezzo ha toccato un minimo locale (più basso delle 3 candele precedenti)
+        local_low = lows[i] <= min(lows[i-1], lows[i-2], lows[i-3])
+        if in_uptrend and local_low:
+            s = 2 if vol_pct <= 0.20 else 1
+            patterns.append({
+                'name': 'Test', 'direction': 'LONG', 'strength': s,
+                'desc': f'Test — pullback su minimo locale in uptrend con vol basso ({vol_ratio:.2f}×) → trend continua',
+            })
+
+    # ── 6. SIGN OF STRENGTH — SOS (candela rialzista ampia dopo laterale) ─
+    # Logica: volume alto + range ampio + candela bullish + close in cima +
+    # EMA rialziste → breakout reale dopo fase di accumulo. Con-trend LONG.
+    if vol_pct >= 0.75 and range_pct >= 0.60 and is_bull and close_pos >= 0.65 and i >= 15:
+        ema9_vals  = _ema(closes, 9)
+        ema21_vals = _ema(closes, 21)
+        in_uptrend = (ema9_vals[i] and ema21_vals[i] and
+                      ema9_vals[i] > ema21_vals[i])
+        # Verifica lateralità recente: range delle ultime 8 candele compresso
+        recent_highs = highs[i-8:i]
+        recent_lows  = lows[i-8:i]
+        lateral_range = (max(recent_highs) - min(recent_lows)) / closes[i]
+        was_lateral = lateral_range < 0.025  # meno del 2.5% di escursione
+        if in_uptrend and was_lateral:
+            s = 2 if (vol_pct >= 0.90 and close_pos >= 0.80) else 1
+            patterns.append({
+                'name': 'Sign of Strength', 'direction': 'LONG', 'strength': s,
+                'desc': f'SOS — breakout rialzista vol {vol_ratio:.1f}× dopo laterale → forza con-trend confermata',
+            })
+
+    # ── 7. SIGN OF WEAKNESS — SOW (candela ribassista ampia dopo laterale) ─
+    # Logica: speculare al SOS ma per SHORT. Volume alto + range ampio +
+    # candela bearish + close in fondo + EMA ribassiste → breakdown reale.
+    if vol_pct >= 0.75 and range_pct >= 0.60 and not is_bull and close_pos <= 0.35 and i >= 15:
+        ema9_vals  = _ema(closes, 9)
+        ema21_vals = _ema(closes, 21)
+        in_downtrend = (ema9_vals[i] and ema21_vals[i] and
+                        ema9_vals[i] < ema21_vals[i])
+        recent_highs = highs[i-8:i]
+        recent_lows  = lows[i-8:i]
+        lateral_range = (max(recent_highs) - min(recent_lows)) / closes[i]
+        was_lateral = lateral_range < 0.025
+        if in_downtrend and was_lateral:
+            s = 2 if (vol_pct >= 0.90 and close_pos <= 0.20) else 1
+            patterns.append({
+                'name': 'Sign of Weakness', 'direction': 'SHORT', 'strength': s,
+                'desc': f'SOW — breakdown ribassista vol {vol_ratio:.1f}× dopo laterale → debolezza con-trend confermata',
+            })
+
     return patterns
 
 
