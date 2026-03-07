@@ -81,37 +81,48 @@ HYPERLIQUID_API   = os.getenv('HYPERLIQUID_API', 'https://api.hyperliquid.xyz/in
 SUPPORTED_DEXS    = [d.strip() for d in os.getenv('SUPPORTED_DEXS', 'xyz').split(',') if d.strip()]
 
 # Chat IDs: SCANNER_CHAT_IDS ha priorità, poi cade su WALLET_ALLOWED_CHATS del bot principale
-# Standalone:  aggiungi SCANNER_CHAT_IDS=tuo_id nel .env
-# Integrato:   lascia vuoto, usa automaticamente WALLET_ALLOWED_CHATS già configurato
 _raw_ids = os.getenv('SCANNER_CHAT_IDS', '') or os.getenv('WALLET_ALLOWED_CHATS', '')
 TELEGRAM_CHAT_IDS = [x.strip() for x in _raw_ids.split(',') if x.strip()]
+
+# Simboli 24/7 (crypto): letti dal .env, default = i perp standard più comuni
+# Tutto ciò che NON è in questa lista viene trattato come XYZ (mercato con orari)
+# Nel .env: SCANNER_24H_SYMBOLS=BTC,ETH,SOL,XRP,SUI,HYPE,KAS
+_raw_24h = os.getenv('SCANNER_24H_SYMBOLS', 'BTC,ETH,SOL,XRP,SUI,HYPE,KAS,MSTR,COIN,XYZ100')
+SYMBOLS_24H = {s.strip().upper() for s in _raw_24h.split(',') if s.strip()}
+
+# Orario mercati XYZ: nessun filtro orario, solo weekend
+# (sabato e domenica i simboli XYZ vengono saltati automaticamente)
 
 DEFAULT_MIN_SCORE = 60
 LOOKBACK          = 150
 
-# Moltiplicatori ATR per categoria — il target minimo è impostato per essere operativo
-# Crypto: ATR 15m già significativo (BTC ~50-200$) → 3.0/1.5
-# Azioni: ATR 15m piccolo (AAPL ~0.3$) → usa ATR daily stimato (×6.5 candele 15m in giornata)
-# Commodity: via di mezzo
-_CRYPTO  = {'BTC','ETH','SOL','XRP','SUI','HYPE','KAS','MSTR','COIN','XYZ100'}
+# Moltiplicatori ATR per categoria
 _STOCKS  = {'AAPL','AMD','AMZN','BABA','COIN','GOOGL','HOOD','INTC','META','MSFT',
             'MU','NFLX','NVDA','ORCL','PLTR','RIVN','SNDK','TSLA','TSM','CRCL',
             'CRWV','SMSN','HYUNDAI','SKHX'}
 _FOREX   = {'EUR','JPY'}
 
 def _atr_multipliers(symbol: str):
-    """Restituisce (target_mult, stop_mult) adattivi alla categoria del simbolo."""
     s = symbol.upper()
-    if s in _CRYPTO:
-        return 3.0, 1.5    # crypto: ATR 15m grande
+    if s in SYMBOLS_24H:
+        return 3.0, 1.5
     elif s in _STOCKS:
-        return 8.0, 4.0    # azioni: ATR 15m piccolo, serve mult alto
+        return 8.0, 4.0
     elif s in _FOREX:
-        return 5.0, 2.5    # forex
-    else:
-        # Commodity e altro: stima dinamica basata sul prezzo
-        # (prezzi alti come GOLD/PALLADIUM hanno ATR % piccolo)
         return 5.0, 2.5
+    else:
+        return 5.0, 2.5
+
+
+def is_market_open(symbol: str) -> bool:
+    """
+    Restituisce True se il simbolo può essere tradato adesso.
+    Crypto (in SYMBOLS_24H): sempre True.
+    Tutto il resto (XYZ): False nel weekend (sabato e domenica).
+    """
+    if symbol.upper() in SYMBOLS_24H:
+        return True
+    return datetime.now().weekday() < 5   # 0-4 = lun-ven, 5-6 = weekend
 
 _last_signals: dict = {}
 _live_prices:  dict = {}   # cache prezzi live Hyperliquid {symbol: float}
@@ -670,6 +681,8 @@ async def run_scan(symbols, min_score, dry_run, chat_ids, verbose=True):
     skipped = 0
 
     for sym in symbols:
+        if not is_market_open(sym):
+            continue
         data = load_last_candles(sym, LOOKBACK)
         if data is None:
             skipped += 1
