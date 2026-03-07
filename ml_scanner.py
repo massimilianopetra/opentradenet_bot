@@ -490,10 +490,214 @@ def get_context(data, i):
 
 
 # ---------------------------------------------------------------------------
+# 4b. CONTESTO MACRO — trend recente, MACD, pivot S/R, funding
+# ---------------------------------------------------------------------------
+
+def get_macro_context(data: dict, i: int, direction: str) -> dict:
+    """
+    Analisi del contesto macro sulla candela i.
+    Restituisce un dict con penalità/bonus e descrizioni.
+
+    COMPONENTI
+    ──────────
+    1. Trend recente (ultime 8 candele): il segnale è a favore o contro?
+       Contro-trend forte → penalità -15 sul score finale
+       Con-trend → bonus +8
+
+    2. MACD momentum: istogramma in espansione nella direzione del segnale?
+       MACD contrario in espansione → penalità -10
+       MACD favorevole → bonus +5
+
+    3. Pivot S/R: il target è raggiungibile prima di una resistenza/supporto?
+       Livello S/R tra prezzo e target → penalità -8
+       Nessun ostacolo → nessuna penalità
+
+    4. Funding rate: recuperato via API se disponibile
+       Funding > soglia nella direzione del segnale → bonus +15
+       (implementato in fetch_funding_rate, chiamata separata)
+    """
+    closes = data['closes']
+    highs  = data['highs']
+    lows   = data['lows']
+
+    penalty = 0
+    bonus   = 0
+    desc    = []
+
+    # ── 1. TREND RECENTE (ultime 8 candele) ──────────────────────────────
+    if i >= 8:
+        # Velocità trend: return % su 8 candele
+        trend_8  = (closes[i] - closes[i-8]) / closes[i-8]
+        # Quante candele consecutive nella direzione opposta al nostro segnale?
+        opp_consec = 0
+        for j in range(1, 6):
+            if i - j < 0:
+                break
+            c_bull = closes[i-j] > closes[i-j-1] if i-j > 0 else False
+            if direction == 'LONG' and not c_bull:
+                opp_consec += 1
+            elif direction == 'SHORT' and c_bull:
+                opp_consec += 1
+            else:
+                break
+
+        # Trend forte contro → penalità pesante
+        if direction == 'LONG' and trend_8 < -0.02:
+            penalty -= 15
+            desc.append(f"⚠️ Trend ribassista forte ({trend_8*100:.1f}% in 8 candele)")
+        elif direction == 'SHORT' and trend_8 > 0.02:
+            penalty -= 15
+            desc.append(f"⚠️ Trend rialzista forte ({trend_8*100:+.1f}% in 8 candele)")
+        elif direction == 'LONG' and trend_8 < -0.008:
+            penalty -= 8
+            desc.append(f"⚠️ Trend leggermente contro ({trend_8*100:.1f}%)")
+        elif direction == 'SHORT' and trend_8 > 0.008:
+            penalty -= 8
+            desc.append(f"⚠️ Trend leggermente contro ({trend_8*100:+.1f}%)")
+        # Con-trend
+        elif direction == 'LONG' and trend_8 > 0.008:
+            bonus += 8
+            desc.append(f"✅ Trend favorevole ({trend_8*100:+.1f}% in 8 candele)")
+        elif direction == 'SHORT' and trend_8 < -0.008:
+            bonus += 8
+            desc.append(f"✅ Trend favorevole ({trend_8*100:.1f}% in 8 candele)")
+
+        # Candele consecutive contro: se ≥3 il momentum è già esaurito? No, VSA dice di sì
+        # Non penalizziamo ulteriormente perché è già catturato dal trend_8
+
+    # ── 2. MACD MOMENTUM ─────────────────────────────────────────────────
+    # Calcola MACD (12/26/9) manuale
+    ema12 = _ema(closes, 12)
+    ema26 = _ema(closes, 26)
+    macd_line = [
+        (ema12[j] - ema26[j]) if (ema12[j] and ema26[j]) else None
+        for j in range(len(closes))
+    ]
+    # Signal line = EMA9 del MACD
+    macd_vals  = [v if v is not None else 0.0 for v in macd_line]
+    signal_line = _ema(macd_vals, 9)
+    hist = [
+        (macd_line[j] - signal_line[j])
+        if (macd_line[j] is not None and signal_line[j] is not None) else None
+        for j in range(len(closes))
+    ]
+
+    if hist[i] is not None and i >= 2:
+        h_curr = hist[i]
+        h_prev = hist[i-1] if hist[i-1] is not None else 0
+
+        # Istogramma in espansione nella direzione sbagliata?
+        if direction == 'LONG':
+            if h_curr < 0 and abs(h_curr) > abs(h_prev):
+                penalty -= 10
+                desc.append("⚠️ MACD bearish in espansione")
+            elif h_curr > 0:
+                bonus += 5
+                desc.append("✅ MACD bullish a supporto")
+        else:  # SHORT
+            if h_curr > 0 and h_curr > h_prev:
+                penalty -= 10
+                desc.append("⚠️ MACD bullish in espansione")
+            elif h_curr < 0:
+                bonus += 5
+                desc.append("✅ MACD bearish a supporto")
+
+    # ── 3. PIVOT S/R — ostacoli tra prezzo e target ───────────────────────
+    # Calcola pivot semplici: massimi/minimi locali su finestra 5 candele
+    pivots_high = []
+    pivots_low  = []
+    window = 3
+    for j in range(window, i - window):
+        if all(highs[j] >= highs[j-k] and highs[j] >= highs[j+k]
+               for k in range(1, window+1)):
+            pivots_high.append(highs[j])
+        if all(lows[j] <= lows[j-k] and lows[j] <= lows[j+k]
+               for k in range(1, window+1)):
+            pivots_low.append(lows[j])
+
+    c = closes[i]
+    atr_vals = _atr(highs, lows, closes)
+    atr = next((atr_vals[j] for j in range(i, max(i-5, 0), -1)
+                if atr_vals[j] is not None), None)
+
+    if atr:
+        atr_target_mult, _ = _atr_multipliers(data['symbol'])
+        if direction == 'LONG':
+            target_est = c + atr * atr_target_mult
+            # Resistenze tra prezzo e target
+            obstacles = [p for p in pivots_high if c < p < target_est]
+            if obstacles:
+                nearest = min(obstacles)
+                dist_pct = (nearest - c) / c * 100
+                if dist_pct < (target_est - c) / c * 100 * 0.5:
+                    penalty -= 8
+                    desc.append(f"⚠️ Resistenza a ${nearest:.2f} prima del target")
+        else:
+            target_est = c - atr * atr_target_mult
+            # Supporti tra prezzo e target
+            obstacles = [p for p in pivots_low if target_est < p < c]
+            if obstacles:
+                nearest = max(obstacles)
+                dist_pct = (c - nearest) / c * 100
+                if dist_pct < (c - target_est) / c * 100 * 0.5:
+                    penalty -= 8
+                    desc.append(f"⚠️ Supporto a ${nearest:.2f} prima del target")
+
+    return {
+        'macro_penalty': penalty,
+        'macro_bonus':   bonus,
+        'macro_desc':    desc,
+    }
+
+
+async def fetch_funding_rate(symbol: str) -> float | None:
+    """Recupera il funding rate annualizzato per un singolo simbolo. Usa _fetch_all_funding_rates per batch."""
+    rates = await _fetch_all_funding_rates()
+    return rates.get(symbol.upper())
+
+
+async def _fetch_all_funding_rates() -> dict:
+    """
+    Recupera tutti i funding rates in una sola chiamata API.
+    Ritorna {SYMBOL: annualized_rate_pct} es. {'BTC': 682.5, 'ETH': -12.3}
+    Solo simboli PERP (non XYZ che non hanno funding).
+    Fallback silenzioso: ritorna {} se offline.
+    """
+    try:
+        import aiohttp as _aiohttp
+        async with _aiohttp.ClientSession(
+            timeout=_aiohttp.ClientTimeout(total=5)
+        ) as session:
+            async with session.post(
+                HYPERLIQUID_API,
+                json={'type': 'metaAndAssetCtxs'}
+            ) as resp:
+                if resp.status != 200:
+                    return {}
+                data = await resp.json()
+                if not isinstance(data, list) or len(data) < 2:
+                    return {}
+                universe   = data[0].get('universe', [])
+                asset_ctxs = data[1]
+                result = {}
+                for idx, asset in enumerate(universe):
+                    name = asset.get('name', '').upper()
+                    if idx < len(asset_ctxs):
+                        fr = asset_ctxs[idx].get('funding')
+                        if fr is not None:
+                            # funding rate per 8h → annualizzato %
+                            result[name] = float(fr) * 3 * 365 * 100
+                return result
+    except Exception:
+        return {}
+
+
+
+# ---------------------------------------------------------------------------
 # 5. SCORE FINALE
 # ---------------------------------------------------------------------------
 
-def compute_opportunity(data, live_price: float = None):
+def compute_opportunity(data, live_price: float = None, funding_rate: float = None):
     i = len(data['closes']) - 1
 
     atr_vals = _atr(data['highs'], data['lows'], data['closes'])
@@ -526,7 +730,7 @@ def compute_opportunity(data, live_price: float = None):
     if opp_patterns:
         vsa_base -= sum(p['strength'] * 5 for p in opp_patterns)
 
-    # Moltiplicatore contesto
+    # Moltiplicatore contesto BB + EMA
     ctx_mult = 1.0
     if direction == 'LONG':
         if ctx['bb_zone'] in ('lower_band', 'lower_mid'):
@@ -544,14 +748,47 @@ def compute_opportunity(data, live_price: float = None):
             ctx_mult -= 0.3
 
     context_contribution = int(ctx['context_score'] * max(ctx_mult, -1.0))
-    final_score = max(0, min(100, vsa_base + context_contribution))
 
-    # Prezzo: usa live se disponibile, altrimenti close ultima candela
+    # Macro context: trend recente + MACD + pivot S/R
+    macro = get_macro_context(data, i, direction)
+    macro_adj = macro['macro_penalty'] + macro['macro_bonus']
+
+    # Funding rate bonus
+    funding_bonus = 0
+    funding_desc  = []
+    if funding_rate is not None:
+        abs_fr = abs(funding_rate)
+        # Funding positivo = long paga short → favorisce SHORT
+        # Funding negativo = short paga long → favorisce LONG
+        favorable = (direction == 'SHORT' and funding_rate > 0) or \
+                    (direction == 'LONG'  and funding_rate < 0)
+        if favorable:
+            if abs_fr > 200:
+                funding_bonus = 15
+                funding_desc.append(f"💰 Funding {abs_fr:.0f}% annuo a favore 🔥🔥")
+            elif abs_fr > 50:
+                funding_bonus = 10
+                funding_desc.append(f"💰 Funding {abs_fr:.0f}% annuo a favore")
+            elif abs_fr > 10:
+                funding_bonus = 5
+                funding_desc.append(f"💰 Funding {abs_fr:.0f}% annuo a favore")
+        else:
+            # Funding contrario: lieve penalità
+            if abs_fr > 100:
+                funding_bonus = -8
+                funding_desc.append(f"⚠️ Funding {abs_fr:.0f}% annuo contrario")
+            elif abs_fr > 30:
+                funding_bonus = -4
+
+    final_score = max(0, min(100,
+        vsa_base + context_contribution + macro_adj + funding_bonus
+    ))
+
+    # Prezzo: usa live se disponibile
     candle_close = data['closes'][i]
     c = live_price if live_price else candle_close
     price_source = 'live' if live_price else 'candela'
 
-    # Moltiplicatori ATR adattivi per categoria simbolo
     atr_target_mult, atr_stop_mult = _atr_multipliers(data['symbol'])
 
     if atr:
@@ -568,20 +805,27 @@ def compute_opportunity(data, live_price: float = None):
         target = stop = None
         target_pct = stop_pct = rr_ratio = 0
 
+    # Descrizioni complete
+    all_ctx_desc = ctx['context_desc'] + macro['macro_desc'] + funding_desc
+
     return {
-        'symbol':       data['symbol'],
-        'direction':    direction,
-        'score':        final_score,
-        'price':        c,
-        'price_source': price_source,
-        'target':       target,
-        'stop':         stop,
-        'target_pct':   target_pct,
-        'stop_pct':     stop_pct,
-        'rr_ratio':     rr_ratio,
-        'patterns':     main_patterns,
-        'context':      ctx,
-        'timestamp':    data['timestamps'][i] if data['timestamps'] else '',
+        'symbol':        data['symbol'],
+        'direction':     direction,
+        'score':         final_score,
+        'price':         c,
+        'price_source':  price_source,
+        'target':        target,
+        'stop':          stop,
+        'target_pct':    target_pct,
+        'stop_pct':      stop_pct,
+        'rr_ratio':      rr_ratio,
+        'patterns':      main_patterns,
+        'context':       ctx,
+        'macro':         macro,
+        'funding_rate':  funding_rate,
+        'funding_bonus': funding_bonus,
+        'ctx_desc_full': all_ctx_desc,
+        'timestamp':     data['timestamps'][i] if data['timestamps'] else '',
     }
 
 
@@ -627,9 +871,11 @@ def format_alert(r):
         lines.append(f"  [{stars}] {p['name']}")
         lines.append(f"  {p['desc']}")
 
-    if r['context']['context_desc']:
+    # Contesto completo: BB/EMA + macro (trend, MACD, S/R) + funding
+    all_ctx = r.get('ctx_desc_full') or r['context']['context_desc']
+    if all_ctx:
         lines += ["", "📐 Contesto:"]
-        for d in r['context']['context_desc']:
+        for d in all_ctx:
             lines.append(f"  {d}")
 
     lines += ["", f"⏰ {r['timestamp']}  |  15m"]
@@ -667,15 +913,21 @@ async def run_scan(symbols, min_score, dry_run, chat_ids, verbose=True):
     if verbose:
         t = datetime.now(timezone.utc).replace(tzinfo=None).strftime('%Y-%m-%d %H:%M UTC')
         print(f"\n{'═'*55}")
-        print(f"  ml_scanner — VSA + Bollinger + EMA  |  {t}")
+        print(f"  ml_scanner — VSA + BB + EMA + Macro + Funding  |  {t}")
         print(f"  Simboli: {len(symbols)}  |  Min score: {min_score}")
         print(f"{'═'*55}\n")
 
-    # Fetch prezzi live (fallback silenzioso se offline)
-    live_prices = await fetch_live_prices()
+    # Fetch prezzi live e funding rate in parallelo
+    live_prices, funding_map = await asyncio.gather(
+        fetch_live_prices(),
+        _fetch_all_funding_rates(),
+    )
+
     if verbose:
         src = f"prezzi live: {len(live_prices)} simboli" if live_prices else "prezzi live: non disponibili (uso candele)"
-        print(f"  📡 {src}\n")
+        fr_src = f"funding rates: {len(funding_map)} simboli" if funding_map else "funding rates: non disponibili"
+        print(f"  📡 {src}")
+        print(f"  💰 {fr_src}\n")
 
     opportunities = []
     skipped = 0
@@ -687,8 +939,9 @@ async def run_scan(symbols, min_score, dry_run, chat_ids, verbose=True):
         if data is None:
             skipped += 1
             continue
-        live_price = live_prices.get(sym)
-        result = compute_opportunity(data, live_price=live_price)
+        live_price   = live_prices.get(sym)
+        funding_rate = funding_map.get(sym.upper())
+        result = compute_opportunity(data, live_price=live_price, funding_rate=funding_rate)
         if result and result['score'] >= min_score:
             opportunities.append(result)
 
@@ -701,7 +954,8 @@ async def run_scan(symbols, min_score, dry_run, chat_ids, verbose=True):
             for r in opportunities:
                 bar    = '█' * (r['score'] // 10)
                 pnames = ' + '.join(p['name'] for p in r['patterns'])
-                print(f"  {r['symbol']:<12} {r['direction']:<6} {r['score']:>3}/100  {bar}")
+                fr_str = f"  fr={r['funding_rate']:.0f}%" if r.get('funding_rate') else ''
+                print(f"  {r['symbol']:<12} {r['direction']:<6} {r['score']:>3}/100  {bar}{fr_str}")
                 print(f"    └ {pnames}")
         else:
             print(f"  Nessuna opportunità (score < {min_score})")
