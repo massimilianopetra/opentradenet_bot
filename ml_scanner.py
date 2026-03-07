@@ -658,38 +658,49 @@ async def fetch_funding_rate(symbol: str) -> float | None:
 
 async def _fetch_all_funding_rates() -> dict:
     """
-    Recupera tutti i funding rates in una sola chiamata API.
-    Ritorna {SYMBOL: annualized_rate_pct} es. {'BTC': 682.5, 'ETH': -12.3}
-    Solo simboli PERP (non XYZ che non hanno funding).
+    Recupera tutti i funding rates in una sola chiamata API per PERP e XYZ.
+    Fa 2 chiamate in parallelo: una per PERP standard, una per XYZ.
+    Ritorna {SYMBOL: annualized_rate_pct} es. {'BTC': 682.5, 'BRENTOIL': -12.3}
     Fallback silenzioso: ritorna {} se offline.
     """
-    try:
-        import aiohttp as _aiohttp
-        async with _aiohttp.ClientSession(
-            timeout=_aiohttp.ClientTimeout(total=5)
-        ) as session:
-            async with session.post(
-                HYPERLIQUID_API,
-                json={'type': 'metaAndAssetCtxs'}
-            ) as resp:
-                if resp.status != 200:
-                    return {}
-                data = await resp.json()
-                if not isinstance(data, list) or len(data) < 2:
-                    return {}
-                universe   = data[0].get('universe', [])
-                asset_ctxs = data[1]
-                result = {}
-                for idx, asset in enumerate(universe):
-                    name = asset.get('name', '').upper()
-                    if idx < len(asset_ctxs):
-                        fr = asset_ctxs[idx].get('funding')
-                        if fr is not None:
-                            # funding rate per 8h → annualizzato %
-                            result[name] = float(fr) * 3 * 365 * 100
-                return result
-    except Exception:
-        return {}
+    async def _fetch_one(dex: str) -> dict:
+        try:
+            import aiohttp as _aiohttp
+            payload = {'type': 'metaAndAssetCtxs'}
+            if dex:
+                payload['dex'] = dex
+            async with _aiohttp.ClientSession(
+                timeout=_aiohttp.ClientTimeout(total=5)
+            ) as session:
+                async with session.post(HYPERLIQUID_API, json=payload) as resp:
+                    if resp.status != 200:
+                        return {}
+                    data = await resp.json()
+                    if not isinstance(data, list) or len(data) < 2:
+                        return {}
+                    universe   = data[0].get('universe', [])
+                    asset_ctxs = data[1]
+                    result = {}
+                    for idx, asset in enumerate(universe):
+                        name = asset.get('name', '').upper()
+                        # XYZ nomi arrivano come 'xyz:BRENTOIL' — strip del prefisso
+                        if ':' in name:
+                            name = name.split(':', 1)[1]
+                        if idx < len(asset_ctxs):
+                            fr = asset_ctxs[idx].get('funding')
+                            if fr is not None:
+                                result[name] = float(fr) * 24 * 365 * 100
+                    return result
+        except Exception:
+            return {}
+
+    # PERP standard e XYZ in parallelo — 2 chiamate totali
+    perp_rates, xyz_rates = await asyncio.gather(
+        _fetch_one(''),
+        _fetch_one('xyz'),
+    )
+    # Merge: XYZ sovrascrive in caso di conflitto di nome (raro)
+    return {**perp_rates, **xyz_rates}
 
 
 
@@ -862,8 +873,13 @@ def format_alert(r):
             f"🎯 Target: {_fmt_price(r['target'])}  ({t_sign}{r['target_pct']:.1f}%)",
             f"🛑 Stop:   {_fmt_price(r['stop'])}  ({s_sign}{r['stop_pct']:.1f}%)",
             f"📊 R/R:    1 : {r['rr_ratio']:.1f}",
-            "",
         ]
+        # Funding rate — mostrato solo per PERP (quando disponibile)
+        fr = r.get('funding_rate')
+        if fr is not None:
+            sign = '+' if fr >= 0 else ''
+            lines.append(f"💸 Funding: {sign}{fr:.0f}% annuo")
+        lines.append("")
 
     lines.append("📋 Pattern VSA:")
     for p in r['patterns']:
@@ -1025,11 +1041,32 @@ async def daemon_loop(symbols, min_score, chat_ids, interval=15):
 
 def main():
     parser = argparse.ArgumentParser(description='ml_scanner — VSA + BB + EMA')
-    parser.add_argument('--symbol',    default=None)
-    parser.add_argument('--min-score', type=int, default=DEFAULT_MIN_SCORE)
-    parser.add_argument('--dry-run',   action='store_true')
-    parser.add_argument('--daemon',    action='store_true')
+    parser.add_argument('--symbol',       default=None)
+    parser.add_argument('--min-score',    type=int, default=DEFAULT_MIN_SCORE)
+    parser.add_argument('--dry-run',      action='store_true')
+    parser.add_argument('--daemon',       action='store_true')
+    parser.add_argument('--funding-test', action='store_true',
+                        help='Mostra tutti i funding rates letti da PERP e XYZ e termina')
     args = parser.parse_args()
+
+    if args.funding_test:
+        async def _test():
+            print("\n📡 Fetch funding rates (PERP + XYZ)...")
+            rates = await _fetch_all_funding_rates()
+            if not rates:
+                print("  ❌ Nessun dato ricevuto — controlla la connessione")
+                return
+            print(f"  ✅ {len(rates)} simboli trovati\n")
+            # Ordina per valore assoluto decrescente
+            sorted_rates = sorted(rates.items(), key=lambda x: abs(x[1]), reverse=True)
+            print(f"  {'SIMBOLO':<14} {'FUNDING ANNUO':>14}")
+            print(f"  {'─'*30}")
+            for sym, fr in sorted_rates:
+                print(f"  {sym:<14} {fr:>+11.1f}%")
+            print(f"\n  Funding positivo = long paga short")
+            print(f"  Funding negativo = short paga long\n")
+        asyncio.run(_test())
+        return
 
     chat_ids = TELEGRAM_CHAT_IDS
     if not chat_ids and not args.dry_run:
