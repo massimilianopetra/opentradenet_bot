@@ -17,6 +17,7 @@ import matplotlib
 matplotlib.use('Agg')   # ← fondamentale su server senza display
 import matplotlib.pyplot as plt
 import candle_chart as cc
+import importlib, ml_scanner as _mls
 
 # ---------------------------------------------------------------------------
 # Configurazione ambiente
@@ -172,6 +173,10 @@ class HyperliquidPriceMonitor:
         # chat_id con tracking attivo (default: tutti quelli con address configurato)
         self.tracking_enabled:  Set[int]                   = set()
         self.session: Optional[aiohttp.ClientSession] = None
+        # ML Scanner
+        self.scanner_enabled:   bool  = False   # daemon attivo?
+        self.scanner_min_score: int   = 60      # soglia score
+        self.scanner_chat_ids:  set   = set()   # chat_id che ricevono alert scanner
 
     async def init_session(self):
         if self.session is None:
@@ -506,6 +511,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/orders                    — ordini condizionali attivi\n"
         "/cancelcond ID|all         — cancella ordine condizionale\n"
         "/chart SYM [N]            — grafico candele 15m\n"
+        "/scan [SYM] [SCORE]       — scan VSA opportunità\n"
+        "/scan daemon [SCORE]      — attiva scan automatico\n"
+        "/scanstop                 — ferma scan automatico\n"
+        "/scanstatus               — stato scanner\n"
         "/stats — statistiche bot\n"
         "/help — questo messaggio\n"
     )
@@ -1200,6 +1209,117 @@ def save_candles(symbol: str, candles: list) -> int:
 
     return written
 
+async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if not _is_wallet_allowed(chat_id):
+        await update.message.reply_text("❌ Non autorizzato.")
+        return
+
+    args = context.args or []
+    daemon_mode = False
+    symbol      = None
+    min_score   = monitor.scanner_min_score
+
+    for arg in args:
+        if arg.lower() == 'daemon':
+            daemon_mode = True
+        elif arg.isdigit():
+            min_score = int(arg)
+        else:
+            symbol = arg.upper()
+
+    recipients = list(monitor.spike_subscribers | monitor.tracking_enabled) or [chat_id]
+
+    if daemon_mode:
+        monitor.scanner_enabled   = True
+        monitor.scanner_min_score = min_score
+        monitor.scanner_chat_ids  = set(recipients)
+        score_str = f" (soglia {min_score})" if min_score != 60 else ""
+        await update.message.reply_text(
+            f"🤖 *Scanner daemon attivato*{score_str}\n"
+            f"Scan automatico dopo ogni chiusura candela 15m.\n"
+            f"Alert inviati a {len(recipients)} utente/i.\n"
+            f"Usa /scanstop per fermare.",
+            parse_mode='Markdown'
+        )
+        return
+
+    symbols = [symbol] if symbol else _mls.discover_symbols()
+    if not symbols:
+        await update.message.reply_text("❌ Nessun simbolo trovato.")
+        return
+
+    sym_str = symbol if symbol else f"tutti i simboli ({len(symbols)})"
+    await update.message.reply_text(f"🔍 Scan in corso su {sym_str}...")
+
+    live_prices = await _mls.fetch_live_prices()
+    opportunities = []
+    for sym in symbols:
+        data = _mls.load_last_candles(sym, _mls.LOOKBACK)
+        if data is None:
+            continue
+        lp     = live_prices.get(sym)
+        result = _mls.compute_opportunity(data, live_price=lp)
+        if result and result['score'] >= min_score:
+            opportunities.append(result)
+
+    opportunities.sort(key=lambda r: r['score'], reverse=True)
+
+    if not opportunities:
+        await update.message.reply_text(
+            f"📭 Nessuna opportunità trovata (score < {min_score})."
+        )
+        return
+
+    for r in opportunities:
+        msg = _mls.format_alert(r)
+        try:
+            await update.message.reply_text(msg, parse_mode='HTML')
+        except Exception as e:
+            logger.error(f"Errore invio alert scan: {e}")
+
+
+async def scanstop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if not _is_wallet_allowed(chat_id):
+        await update.message.reply_text("❌ Non autorizzato.")
+        return
+
+    if monitor.scanner_enabled:
+        monitor.scanner_enabled = False
+        monitor.scanner_chat_ids.clear()
+        await update.message.reply_text("⏸ *Scanner daemon fermato.*", parse_mode='Markdown')
+    else:
+        await update.message.reply_text("ℹ️ Scanner daemon non era attivo.")
+
+
+async def scanstatus_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if not _is_wallet_allowed(chat_id):
+        await update.message.reply_text("❌ Non autorizzato.")
+        return
+
+    stato   = "✅ ATTIVO" if monitor.scanner_enabled else "⏸ NON ATTIVO"
+    score   = monitor.scanner_min_score
+    n_users = len(monitor.scanner_chat_ids)
+    last    = _mls._last_signals
+
+    last_str = ""
+    if last:
+        recenti = sorted(last.items(), key=lambda x: x[1]['time'], reverse=True)[:5]
+        last_str = "\n\nUltimi segnali:\n" + "\n".join(
+            f"  {sym}: {v['direction']} score={v['score']} @ {v['time'].strftime('%H:%M')}"
+            for sym, v in recenti
+        )
+
+    await update.message.reply_text(
+        f"📡 *ML Scanner* — {stato}\n"
+        f"Soglia score: {score}/100\n"
+        f"Utenti: {n_users}\n"
+        f"Simboli disponibili: {len(_mls.discover_symbols())}"
+        f"{last_str}",
+        parse_mode='Markdown'
+    )
 
 async def candle_task(application: Application):
     """
@@ -1244,6 +1364,50 @@ async def candle_task(application: Application):
                 f"🕯 Candele 15m: {total_written} righe scritte su {len(all_symbols)} simboli"
                 + (f" ({errors} errori)" if errors else "")
             )
+
+            # Trigger scanner daemon se attivo
+            if monitor.scanner_enabled and monitor.scanner_chat_ids:
+                logger.info("🔍 Scanner daemon: avvio scan post-candela")
+                try:
+                    live_prices   = await _mls.fetch_live_prices()
+                    scan_syms     = _mls.discover_symbols()
+                    opportunities = []
+                    for sym in scan_syms:
+                        data = _mls.load_last_candles(sym, _mls.LOOKBACK)
+                        if data is None:
+                            continue
+                        lp     = live_prices.get(sym)
+                        result = _mls.compute_opportunity(data, live_price=lp)
+                        if result and result['score'] >= monitor.scanner_min_score:
+                            opportunities.append(result)
+
+                    opportunities.sort(key=lambda r: r['score'], reverse=True)
+
+                    for r in opportunities:
+                        sym   = r['symbol']
+                        score = r['score']
+                        dirn  = r['direction']
+                        last  = _mls._last_signals.get(sym)
+                        if last and last['direction'] == dirn and score <= last['score']:
+                            continue
+                        _mls._last_signals[sym] = {
+                            'score': score, 'direction': dirn,
+                            'time': datetime.now()
+                        }
+                        msg = _mls.format_alert(r)
+                        for cid in monitor.scanner_chat_ids:
+                            try:
+                                await application.bot.send_message(
+                                    chat_id=cid, text=msg, parse_mode='HTML'
+                                )
+                            except Exception as e:
+                                logger.error(f"Errore invio scanner alert a {cid}: {e}")
+
+                    if opportunities:
+                        logger.info(f"🔍 Scanner: {len(opportunities)} opportunità trovate")
+
+                except Exception as e:
+                    logger.error(f"Errore scanner daemon: {e}", exc_info=True)
 
         except Exception as e:
             logger.error(f"Errore nel candle task: {e}", exc_info=True)
@@ -3031,6 +3195,9 @@ def main():
     app.add_handler(CommandHandler("orders",       orders_command))
     app.add_handler(CommandHandler("cancelcond",   cancelcond_command))
     app.add_handler(CommandHandler("chart", chart_command))
+    app.add_handler(CommandHandler("scan",         scan_command))
+    app.add_handler(CommandHandler("scanstop",     scanstop_command))
+    app.add_handler(CommandHandler("scanstatus",   scanstatus_command))
 
     app.post_init     = post_init
     app.post_shutdown = post_shutdown
