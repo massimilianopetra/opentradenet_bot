@@ -1252,14 +1252,18 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sym_str = symbol if symbol else f"tutti i simboli ({len(symbols)})"
     await update.message.reply_text(f"🔍 Scan in corso su {sym_str}...")
 
-    live_prices = await _mls.fetch_live_prices()
+    live_prices, funding_map = await asyncio.gather(
+        _mls.fetch_live_prices(),
+        _mls._fetch_all_funding_rates(),
+    )
     opportunities = []
     for sym in symbols:
         data = _mls.load_last_candles(sym, _mls.LOOKBACK)
         if data is None:
             continue
-        lp     = live_prices.get(sym)
-        result = _mls.compute_opportunity(data, live_price=lp)
+        lp   = live_prices.get(sym)
+        fr   = funding_map.get(sym.upper())
+        result = _mls.compute_opportunity(data, live_price=lp, funding_rate=fr)
         if result and result['score'] >= min_score:
             opportunities.append(result)
 
@@ -1369,15 +1373,19 @@ async def candle_task(application: Application):
             if monitor.scanner_enabled and monitor.scanner_chat_ids:
                 logger.info("🔍 Scanner daemon: avvio scan post-candela")
                 try:
-                    live_prices   = await _mls.fetch_live_prices()
-                    scan_syms     = _mls.discover_symbols()
+                    live_prices, funding_map = await asyncio.gather(
+                        _mls.fetch_live_prices(),
+                        _mls._fetch_all_funding_rates(),
+                    )
+                    scan_syms   = _mls.discover_symbols()
                     opportunities = []
                     for sym in scan_syms:
                         data = _mls.load_last_candles(sym, _mls.LOOKBACK)
                         if data is None:
                             continue
-                        lp     = live_prices.get(sym)
-                        result = _mls.compute_opportunity(data, live_price=lp)
+                        lp = live_prices.get(sym)
+                        fr = funding_map.get(sym.upper())
+                        result = _mls.compute_opportunity(data, live_price=lp, funding_rate=fr)
                         if result and result['score'] >= monitor.scanner_min_score:
                             opportunities.append(result)
 

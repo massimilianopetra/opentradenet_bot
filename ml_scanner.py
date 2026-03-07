@@ -874,11 +874,10 @@ def format_alert(r):
             f"🛑 Stop:   {_fmt_price(r['stop'])}  ({s_sign}{r['stop_pct']:.1f}%)",
             f"📊 R/R:    1 : {r['rr_ratio']:.1f}",
         ]
-        # Funding rate — mostrato solo per PERP (quando disponibile)
+        # Funding rate — mostrato sempre (PERP e XYZ), omesso solo se None
         fr = r.get('funding_rate')
         if fr is not None:
-            sign = '+' if fr >= 0 else ''
-            lines.append(f"💸 Funding: {sign}{fr:.0f}% annuo")
+            lines.append(f"💸 Funding: {fr:+.0f}% annuo")
         lines.append("")
 
     lines.append("📋 Pattern VSA:")
@@ -925,7 +924,7 @@ async def send_telegram(message, chat_ids):
 # 8. SCAN
 # ---------------------------------------------------------------------------
 
-async def run_scan(symbols, min_score, dry_run, chat_ids, verbose=True):
+async def run_scan(symbols, min_score, dry_run, chat_ids, verbose=True, notify_empty=False):
     if verbose:
         t = datetime.now(timezone.utc).replace(tzinfo=None).strftime('%Y-%m-%d %H:%M UTC')
         print(f"\n{'═'*55}")
@@ -994,6 +993,15 @@ async def run_scan(symbols, min_score, dry_run, chat_ids, verbose=True):
         if not dry_run:
             await send_telegram(msg, chat_ids)
             sent += 1
+
+    # Messaggio "nessuna opportunità" solo se richiesto esplicitamente
+    # (scan manuale sì, daemon no — non bombardare ogni 15 min)
+    if not dry_run and not opportunities and notify_empty:
+        t = datetime.now(timezone.utc).replace(tzinfo=None).strftime('%H:%M')
+        await send_telegram(
+            f"📭 Nessuna opportunità trovata (score &lt; {min_score})  [{t}]",
+            chat_ids
+        )
 
     if verbose and sent > 0:
         print(f"\n  📬 {sent} alert inviati su Telegram")
@@ -1064,7 +1072,14 @@ def main():
             for sym, fr in sorted_rates:
                 print(f"  {sym:<14} {fr:>+11.1f}%")
             print(f"\n  Funding positivo = long paga short")
-            print(f"  Funding negativo = short paga long\n")
+            print(f"  Funding negativo = short paga long")
+            # Debug: mostra se NFLX e altri XYZ noti sono presenti
+            test_syms = ['NFLX', 'AAPL', 'BRENTOIL', 'GOLD', 'AMD']
+            print(f"\n  🔍 Check simboli XYZ noti:")
+            for s in test_syms:
+                val = rates.get(s)
+                print(f"    {s:<12} {'✅ ' + f'{val:+.1f}%' if val is not None else '❌ non trovato'}")
+            print()
         asyncio.run(_test())
         return
 
@@ -1082,7 +1097,7 @@ def main():
         asyncio.run(daemon_loop(symbols, args.min_score, chat_ids))
     else:
         asyncio.run(run_scan(symbols, args.min_score, args.dry_run,
-                             chat_ids, verbose=True))
+                             chat_ids, verbose=True, notify_empty=True))
 
 
 if __name__ == '__main__':
