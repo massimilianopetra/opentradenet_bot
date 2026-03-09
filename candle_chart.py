@@ -1,32 +1,74 @@
 #!/usr/bin/env python3
 """
-candle_chart.py — Grafico candlestick interattivo da CSV
-Struttura attesa: data/candles/SIMBOLO/SIMBOLO_15m.csv
-                  oppure: data/candles/SIMBOLO_15m.csv
+candle_chart.py — Grafico candlestick multi-timeframe da CSV 15m
 
-Dipendenze: matplotlib, numpy  (no pandas)
+Aggrega automaticamente le candele a 15m in 1H o 1D prima di plottare.
+Non richiede pandas — usa solo matplotlib e numpy.
 
-Uso:
-    python candle_chart.py GOLD
-    python candle_chart.py SILVER --bars 96
-    python candle_chart.py GOLD --bars 200 --data-dir /altro/percorso
-    python candle_chart.py GOLD --save chart.png
+Uso standalone:
+    python3 candle_chart.py GOLD                          # 15m, ultime 120 candele (~30h)
+    python3 candle_chart.py GOLD --bars 200               # 15m, 200 candele
+    python3 candle_chart.py GOLD --timeframe 1H           # 1H, ultime 120 ore
+    python3 candle_chart.py GOLD --timeframe 1H --bars 72 # 1H, ultime 72 ore (3 giorni)
+    python3 candle_chart.py GOLD --timeframe 1D           # 1D, ultimi 120 giorni
+    python3 candle_chart.py GOLD --timeframe 1D --bars 60 # 1D, ultimi 60 giorni
+    python3 candle_chart.py GOLD --save gold_chart.png    # salva PNG
+    python3 candle_chart.py GOLD --data-dir /altro/path   # directory custom
+
+Uso come modulo (da hyperliquid_bot.py):
+    import candle_chart as cc
+    csv_path = cc.find_csv(symbol, Path(CANDLES_DIR))
+    data     = cc.load_csv(csv_path, bars, timeframe='1H')   # ← aggiunto timeframe
+    n        = len(data['closes'])
+    fig      = cc.plot_chart(data, symbol, timeframe='1H')
+    fig.savefig(tmp_path, dpi=110, bbox_inches='tight', facecolor='#0d1117')
 """
 
 import argparse
+import csv
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 import numpy as np
 
+# ---------------------------------------------------------------------------
+# Costanti
+# ---------------------------------------------------------------------------
+
+TIMEFRAMES = {
+    '15m': {'minutes': 15,  'label': '15m', 'group_fmt': '%Y-%m-%d %H:%M'},
+    '1H':  {'minutes': 60,  'label': '1H',  'group_fmt': '%Y-%m-%d %H:00'},
+    '1D':  {'minutes': 1440,'label': '1D',  'group_fmt': '%Y-%m-%d'},
+}
+
+# Numero di candele 15m per aggregare ciascun timeframe
+TF_CANDLES = {
+    '15m': 1,
+    '1H':  4,
+    '1D':  96,
+}
+
+# Default bar counts per timeframe
+DEFAULT_BARS = {
+    '15m': 120,   # ~30 ore
+    '1H':  120,   # 5 giorni
+    '1D':  120,   # ~4 mesi
+}
 
 # ---------------------------------------------------------------------------
-# Ricerca file CSV
+# Ricerca CSV
 # ---------------------------------------------------------------------------
 
 def find_csv(symbol: str, data_dir: Path) -> Path:
-    symbol = symbol.upper()
+    """
+    Cerca il CSV delle candele 15m del simbolo in varie posizioni standard.
+    Lancia FileNotFoundError se non trovato.
+    """
     candidates = [
         data_dir / symbol / f"{symbol}_15m.csv",
         data_dir / f"{symbol}_15m.csv",
@@ -36,366 +78,449 @@ def find_csv(symbol: str, data_dir: Path) -> Path:
     for p in candidates:
         if p.exists():
             return p
-    for p in data_dir.rglob(f"*{symbol}*.csv"):
-        return p
     raise FileNotFoundError(
-        f"Nessun CSV trovato per '{symbol}' in {data_dir}\n"
-        "Percorsi cercati:\n" + "\n".join(f"  {c}" for c in candidates)
+        f"Nessun CSV trovato per {symbol} in {data_dir}. "
+        f"Cercato: {[str(c) for c in candidates]}"
     )
 
+# ---------------------------------------------------------------------------
+# Aggregazione timeframe
+# ---------------------------------------------------------------------------
+
+def _group_key(ts_str: str, tf: str) -> str:
+    """Calcola la chiave di raggruppamento per una riga CSV dato il timeframe."""
+    fmt = TIMEFRAMES[tf]['group_fmt']
+    dt  = datetime.strptime(ts_str, '%Y-%m-%d %H:%M:%S')
+    if tf == '1H':
+        return dt.strftime(fmt)
+    if tf == '1D':
+        return dt.strftime(fmt)
+    return ts_str  # 15m: chiave = timestamp stesso
+
+
+def resample_rows(rows: list, tf: str) -> list:
+    """
+    Aggrega una lista di righe CSV raw (dict con keys: timestamp,open,high,low,close,volume)
+    nel timeframe richiesto.
+    Ritorna lista di dict con le stesse chiavi.
+    """
+    if tf == '15m':
+        return rows  # nessuna aggregazione
+
+    groups: dict = {}
+    order:  list = []
+
+    for row in rows:
+        key = _group_key(row['timestamp'], tf)
+        if key not in groups:
+            groups[key] = {
+                'timestamp': row['timestamp'],
+                'open':      row['open'],
+                'high':      row['high'],
+                'low':       row['low'],
+                'close':     row['close'],
+                'volume':    row['volume'],
+            }
+            order.append(key)
+        else:
+            g = groups[key]
+            g['high']   = max(g['high'],   row['high'])
+            g['low']    = min(g['low'],    row['low'])
+            g['close']  = row['close']
+            g['volume'] += row['volume']
+
+    return [groups[k] for k in order]
 
 # ---------------------------------------------------------------------------
-# Lettura CSV senza pandas — split puro
+# Lettura CSV + aggregazione
 # ---------------------------------------------------------------------------
 
-def load_csv(path: Path, bars: int) -> dict:
+def load_csv(csv_path: Path, bars: int = 120, timeframe: str = '15m') -> dict:
     """
-    Legge il CSV riga per riga con split(',').
-    Formato atteso: timestamp,open,high,low,close,volume
-    Ritorna dict di liste Python sliciate alle ultime `bars` righe.
-    """
-    dates, opens, highs, lows, closes, volumes = [], [], [], [], [], []
+    Legge il CSV delle candele 15m, aggrega nel timeframe richiesto,
+    ritorna un dict con arrays numpy pronti per il plot.
 
-    with open(path, encoding='utf-8') as fh:
-        header = True
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            if header:
-                header = False
-                continue
-            parts = line.split(',')
-            if len(parts) < 6:
-                continue
+    Args:
+        csv_path:  percorso al CSV 15m
+        bars:      numero di candele del timeframe richiesto da restituire
+        timeframe: '15m' | '1H' | '1D'
+
+    Returns:
+        dict con keys: timestamps, opens, highs, lows, closes, volumes
+    """
+    if timeframe not in TIMEFRAMES:
+        raise ValueError(f"Timeframe non valido: {timeframe}. Usa: {list(TIMEFRAMES.keys())}")
+
+    # Per avere 'bars' candele nel TF finale, dobbiamo leggere abbastanza 15m
+    # Leggiamo sempre tutto (efficiente: file raramente > 100k righe) poi tagliamo
+    raw_rows = []
+    with open(csv_path, newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
             try:
-                dates.append(parts[0].strip())
-                opens.append(float(parts[1]))
-                highs.append(float(parts[2]))
-                lows.append(float(parts[3]))
-                closes.append(float(parts[4]))
-                volumes.append(float(parts[5]))
-            except ValueError:
+                raw_rows.append({
+                    'timestamp': row['timestamp'],
+                    'open':      float(row['open']),
+                    'high':      float(row['high']),
+                    'low':       float(row['low']),
+                    'close':     float(row['close']),
+                    'volume':    float(row['volume']),
+                })
+            except (ValueError, KeyError):
                 continue
 
-    n = min(bars, len(dates))
+    if not raw_rows:
+        raise ValueError(f"CSV vuoto o malformato: {csv_path}")
+
+    # Aggrega nel timeframe
+    resampled = resample_rows(raw_rows, timeframe)
+
+    # Taglia alle ultime 'bars' candele
+    resampled = resampled[-bars:] if len(resampled) > bars else resampled
+
+    if not resampled:
+        raise ValueError(f"Nessuna candela dopo il resampling a {timeframe}")
+
+    timestamps = [r['timestamp'] for r in resampled]
+    opens      = np.array([r['open']   for r in resampled], dtype=float)
+    highs      = np.array([r['high']   for r in resampled], dtype=float)
+    lows       = np.array([r['low']    for r in resampled], dtype=float)
+    closes     = np.array([r['close']  for r in resampled], dtype=float)
+    volumes    = np.array([r['volume'] for r in resampled], dtype=float)
+
     return {
-        'dates':   dates[-n:],
-        'opens':   opens[-n:],
-        'highs':   highs[-n:],
-        'lows':    lows[-n:],
-        'closes':  closes[-n:],
-        'volumes': volumes[-n:],
-        'total':   len(dates),
+        'timestamps': timestamps,
+        'opens':      opens,
+        'highs':      highs,
+        'lows':       lows,
+        'closes':     closes,
+        'volumes':    volumes,
     }
 
-
 # ---------------------------------------------------------------------------
-# Indicatori tecnici — liste Python puro + numpy solo per il plot
+# Indicatori tecnici (pure Python / numpy)
 # ---------------------------------------------------------------------------
 
-def calc_ema(values: list, period: int) -> list:
-    result = [None] * len(values)
-    if len(values) < period:
-        return result
-    k = 2.0 / (period + 1)
-    result[period - 1] = sum(values[:period]) / period
-    for i in range(period, len(values)):
-        result[i] = values[i] * k + result[i - 1] * (1 - k)
-    return result
+def _ema(arr: np.ndarray, period: int) -> np.ndarray:
+    out = np.full_like(arr, np.nan)
+    k   = 2.0 / (period + 1)
+    # Primo valore = media semplice
+    start = period - 1
+    if start >= len(arr):
+        return out
+    out[start] = np.mean(arr[:period])
+    for i in range(start + 1, len(arr)):
+        out[i] = arr[i] * k + out[i - 1] * (1 - k)
+    return out
 
 
-def calc_rsi(closes: list, period: int = 14) -> list:
-    result = [None] * len(closes)
-    if len(closes) <= period:
-        return result
-    gains  = [max(closes[i] - closes[i-1], 0) for i in range(1, period + 1)]
-    losses = [max(closes[i-1] - closes[i], 0) for i in range(1, period + 1)]
-    avg_g  = sum(gains)  / period
-    avg_l  = sum(losses) / period
-    result[period] = 100 - (100 / (1 + avg_g / avg_l)) if avg_l else 100.0
-    for i in range(period + 1, len(closes)):
-        d      = closes[i] - closes[i - 1]
-        avg_g  = (avg_g * (period - 1) + max(d,  0)) / period
-        avg_l  = (avg_l * (period - 1) + max(-d, 0)) / period
-        result[i] = 100 - (100 / (1 + avg_g / avg_l)) if avg_l else 100.0
-    return result
+def _rsi(closes: np.ndarray, period: int = 14) -> np.ndarray:
+    out    = np.full_like(closes, np.nan)
+    deltas = np.diff(closes)
+    if len(deltas) < period:
+        return out
+    gains  = np.where(deltas > 0, deltas,  0.0)
+    losses = np.where(deltas < 0, -deltas, 0.0)
+    avg_g  = np.mean(gains[:period])
+    avg_l  = np.mean(losses[:period])
+    for i in range(period, len(deltas)):
+        avg_g = (avg_g * (period - 1) + gains[i])  / period
+        avg_l = (avg_l * (period - 1) + losses[i]) / period
+        rs    = avg_g / avg_l if avg_l != 0 else 1e9
+        out[i + 1] = 100 - 100 / (1 + rs)
+    return out
 
 
-def calc_macd(closes: list, fast=12, slow=26, signal=9):
-    ef = calc_ema(closes, fast)
-    es = calc_ema(closes, slow)
-    ml = [
-        (f - s) if f is not None and s is not None else None
-        for f, s in zip(ef, es)
-    ]
-    # EMA del macd_line sui soli valori non-None
-    valid = [(i, v) for i, v in enumerate(ml) if v is not None]
-    sl    = [None] * len(ml)
-    if valid:
-        sub_vals = [v for _, v in valid]
-        sub_ema  = calc_ema(sub_vals, signal)
-        for j, (i, _) in enumerate(valid):
-            sl[i] = sub_ema[j]
-    hist = [
-        (m - s) if m is not None and s is not None else None
-        for m, s in zip(ml, sl)
-    ]
-    return ml, sl, hist
+def _macd(closes: np.ndarray, fast=12, slow=26, signal=9):
+    ema_fast   = _ema(closes, fast)
+    ema_slow   = _ema(closes, slow)
+    macd_line  = ema_fast - ema_slow
+    valid      = ~np.isnan(macd_line)
+    signal_line = np.full_like(macd_line, np.nan)
+    idx        = np.where(valid)[0]
+    if len(idx) >= signal:
+        tmp    = _ema(macd_line[idx], signal)
+        signal_line[idx] = tmp
+    histogram  = macd_line - signal_line
+    return macd_line, signal_line, histogram
 
 
-def calc_bollinger(closes: list, period=20, mult=2):
-    upper, mid, lower = [None]*len(closes), [None]*len(closes), [None]*len(closes)
+def _bollinger(closes: np.ndarray, period: int = 20, std_dev: float = 2.0):
+    upper = np.full_like(closes, np.nan)
+    lower = np.full_like(closes, np.nan)
+    mid   = np.full_like(closes, np.nan)
     for i in range(period - 1, len(closes)):
-        w  = closes[i - period + 1 : i + 1]
-        m  = sum(w) / period
-        sd = (sum((v - m) ** 2 for v in w) / period) ** 0.5
-        mid[i]   = m
-        upper[i] = m + mult * sd
-        lower[i] = m - mult * sd
+        window  = closes[i - period + 1 : i + 1]
+        m       = np.mean(window)
+        s       = np.std(window)
+        mid[i]  = m
+        upper[i] = m + std_dev * s
+        lower[i] = m - std_dev * s
     return upper, mid, lower
 
 
-def calc_vol_ma(volumes: list, period=20) -> list:
-    result = [None] * len(volumes)
-    for i in range(period - 1, len(volumes)):
-        result[i] = sum(volumes[i - period + 1 : i + 1]) / period
-    return result
-
-
-# ---------------------------------------------------------------------------
-# Supporti / Resistenze (pivot locali)
-# ---------------------------------------------------------------------------
-
-def find_pivots(highs: list, lows: list, window: int = 10):
-    res, sup = [], []
+def _pivot_levels(highs: np.ndarray, lows: np.ndarray, window: int = 5, max_levels: int = 4):
+    """Trova supporti e resistenze da pivot locali."""
+    resistances, supports = [], []
     n = len(highs)
     for i in range(window, n - window):
         if highs[i] == max(highs[i - window : i + window + 1]):
-            res.append(highs[i])
-        if lows[i] == min(lows[i - window : i + window + 1]):
-            sup.append(lows[i])
-
-    def dedup(levels):
-        out = []
-        for lv in sorted(set(levels)):
-            if not out or abs(lv - out[-1]) / out[-1] > 0.002:
-                out.append(lv)
-        return out
-
-    return dedup(res)[-4:], dedup(sup)[:4]
-
+            resistances.append(highs[i])
+        if lows[i]  == min(lows[i  - window : i + window + 1]):
+            supports.append(lows[i])
+    # Rimuove duplicati e prende gli ultimi max_levels
+    resistances = sorted(set(round(r, 6) for r in resistances))[-max_levels:]
+    supports    = sorted(set(round(s, 6) for s in supports))[:max_levels]
+    return resistances, supports
 
 # ---------------------------------------------------------------------------
-# Utility
+# Formattazione etichette asse X per ogni timeframe
 # ---------------------------------------------------------------------------
 
-def to_arr(lst: list) -> np.ndarray:
-    return np.array([v if v is not None else np.nan for v in lst], dtype=float)
+def _x_labels(timestamps: list, tf: str, max_labels: int = 8) -> tuple:
+    """
+    Ritorna (positions, labels) per l'asse X del grafico principale.
+    Adatta la granularità in base al timeframe.
+    """
+    n     = len(timestamps)
+    step  = max(1, n // max_labels)
+    pos   = list(range(0, n, step))
 
+    if tf == '15m':
+        fmt = '%d/%m %H:%M'
+    elif tf == '1H':
+        fmt = '%d/%m %H:00'
+    else:  # 1D
+        fmt = '%d/%m/%y'
 
-def fmt_date(s: str) -> str:
-    """'2026-03-01 14:30:00' → '01/03 14:30'"""
-    s = s.strip()
-    parts = s.split(' ')
-    if len(parts) >= 2:
-        d = parts[0].split('-')
-        t = parts[1][:5]
-        if len(d) == 3:
-            return f"{d[2]}/{d[1]} {t}"
-    return s[:16]
+    labels = []
+    for i in pos:
+        try:
+            dt = datetime.strptime(timestamps[i], '%Y-%m-%d %H:%M:%S')
+        except ValueError:
+            try:
+                dt = datetime.strptime(timestamps[i], '%Y-%m-%d')
+            except ValueError:
+                labels.append(timestamps[i][:10])
+                continue
+        labels.append(dt.strftime(fmt))
 
+    return pos, labels
 
 # ---------------------------------------------------------------------------
-# Plot
+# Plot principale
 # ---------------------------------------------------------------------------
 
-def plot_chart(data: dict, symbol: str):
-    closes  = data['closes']
-    opens   = data['opens']
-    highs   = data['highs']
-    lows    = data['lows']
-    volumes = data['volumes']
-    dates   = data['dates']
-    n       = len(closes)
+def plot_chart(data: dict, symbol: str, timeframe: str = '15m') -> plt.Figure:
+    """
+    Genera il grafico a 4 pannelli: candele+BB+EMA+S&R, volume, RSI, MACD.
 
-    ema9  = to_arr(calc_ema(closes, 9))
-    ema21 = to_arr(calc_ema(closes, 21))
-    ema50 = to_arr(calc_ema(closes, 50))
-    bb_u, bb_m, bb_l = calc_bollinger(closes)
-    bb_u, bb_m, bb_l = to_arr(bb_u), to_arr(bb_m), to_arr(bb_l)
-    rsi_v = to_arr(calc_rsi(closes))
-    ml, sl, hist = calc_macd(closes)
-    ml, sl, hist = to_arr(ml), to_arr(sl), to_arr(hist)
-    vol_ma = to_arr(calc_vol_ma(volumes))
+    Args:
+        data:       output di load_csv()
+        symbol:     nome simbolo (per il titolo)
+        timeframe:  '15m' | '1H' | '1D'
 
-    res_lvls, sup_lvls = find_pivots(highs, lows)
+    Returns:
+        matplotlib Figure
+    """
+    timestamps = data['timestamps']
+    opens      = data['opens']
+    highs      = data['highs']
+    lows       = data['lows']
+    closes     = data['closes']
+    volumes    = data['volumes']
+    n          = len(closes)
+    x          = np.arange(n)
 
-    x        = np.arange(n)
-    col_up   = '#26a641'
-    col_down = '#e05c5c'
-    W        = 0.6
+    # ── Indicatori ──────────────────────────────────────────────────────
+    ema9   = _ema(closes, 9)
+    ema21  = _ema(closes, 21)
+    ema50  = _ema(closes, 50)
+    bb_up, bb_mid, bb_lo = _bollinger(closes, 20, 2.0)
+    rsi    = _rsi(closes, 14)
+    macd_l, macd_s, macd_h = _macd(closes, 12, 26, 9)
+    vol_ma = np.full(n, np.nan)
+    for i in range(19, n):
+        vol_ma[i] = np.mean(volumes[i - 19 : i + 1])
+    resistances, supports = _pivot_levels(highs, lows)
 
-    # ── Layout ────────────────────────────────────────────────────────────
-    fig = plt.figure(figsize=(18, 14), facecolor='#0d1117')
+    # ── Layout ──────────────────────────────────────────────────────────
+    fig = plt.figure(figsize=(16, 12), facecolor='#0d1117')
     gs  = fig.add_gridspec(4, 1, height_ratios=[5, 1.5, 1.5, 1.5],
-                           hspace=0.06, left=0.06, right=0.97,
+                           hspace=0.05, left=0.07, right=0.97,
                            top=0.94, bottom=0.06)
-    ax_c = fig.add_subplot(gs[0])
-    ax_v = fig.add_subplot(gs[1], sharex=ax_c)
-    ax_r = fig.add_subplot(gs[2], sharex=ax_c)
-    ax_m = fig.add_subplot(gs[3], sharex=ax_c)
 
-    for ax in [ax_c, ax_v, ax_r, ax_m]:
+    ax1 = fig.add_subplot(gs[0])
+    ax2 = fig.add_subplot(gs[1], sharex=ax1)
+    ax3 = fig.add_subplot(gs[2], sharex=ax1)
+    ax4 = fig.add_subplot(gs[3], sharex=ax1)
+
+    for ax in (ax1, ax2, ax3, ax4):
         ax.set_facecolor('#0d1117')
         ax.tick_params(colors='#8b949e', labelsize=8)
+        ax.spines['bottom'].set_color('#30363d')
+        ax.spines['top'].set_color('#30363d')
+        ax.spines['left'].set_color('#30363d')
+        ax.spines['right'].set_color('#30363d')
         ax.yaxis.label.set_color('#8b949e')
-        for sp in ax.spines.values():
-            sp.set_edgecolor('#21262d')
-    for ax in [ax_c, ax_v, ax_r]:
-        plt.setp(ax.get_xticklabels(), visible=False)
 
-    # ── Candele ───────────────────────────────────────────────────────────
-    for i in range(n):
-        o, h, l, c = opens[i], highs[i], lows[i], closes[i]
-        col = col_up if c >= o else col_down
-        ax_c.plot([i, i], [l, h], color=col, linewidth=0.8, zorder=2)
-        ax_c.bar(i, abs(c - o), bottom=min(o, c), width=W,
-                 color=col, alpha=0.9, zorder=3)
+    # ── Pannello 1: Candlestick + BB + EMA + S&R ────────────────────────
+    w_body  = 0.6
+    w_wick  = 0.8
 
-    # Bollinger
-    ax_c.fill_between(x, bb_u, bb_l, alpha=0.06, color='#58a6ff', label='BB')
-    ax_c.plot(x, bb_u, color='#58a6ff', linewidth=0.6, alpha=0.5)
-    ax_c.plot(x, bb_m, color='#58a6ff', linewidth=0.6, alpha=0.3, linestyle='--')
-    ax_c.plot(x, bb_l, color='#58a6ff', linewidth=0.6, alpha=0.5)
+    for i in x:
+        bull = closes[i] >= opens[i]
+        col  = '#26a641' if bull else '#f85149'
+        lo_b = min(opens[i], closes[i])
+        hi_b = max(opens[i], closes[i])
+        body_h = max(hi_b - lo_b, (highs[i] - lows[i]) * 0.002)
+        ax1.bar(i, body_h,   bottom=lo_b,   width=w_body,  color=col,    zorder=3)
+        ax1.bar(i, highs[i] - lows[i], bottom=lows[i], width=w_wick * 0.12,
+                color=col, zorder=2)
+
+    # Bollinger Bands
+    valid_bb = ~np.isnan(bb_up)
+    if valid_bb.any():
+        ax1.plot(x[valid_bb], bb_up[valid_bb],  color='#58a6ff', lw=0.8, ls='--', alpha=0.6, label='BB up')
+        ax1.plot(x[valid_bb], bb_lo[valid_bb],  color='#58a6ff', lw=0.8, ls='--', alpha=0.6, label='BB lo')
+        ax1.fill_between(x[valid_bb], bb_up[valid_bb], bb_lo[valid_bb],
+                         alpha=0.05, color='#58a6ff')
 
     # EMA
-    ax_c.plot(x, ema9,  color='#f0b429', linewidth=1.0, label='EMA 9',  zorder=4)
-    ax_c.plot(x, ema21, color='#ff7b72', linewidth=1.0, label='EMA 21', zorder=4)
-    ax_c.plot(x, ema50, color='#79c0ff', linewidth=1.2, label='EMA 50', zorder=4)
+    for ema_arr, col, lbl in [(ema9, '#ffd700', 'EMA9'), (ema21, '#ff6b6b', 'EMA21'), (ema50, '#4ecdc4', 'EMA50')]:
+        v = ~np.isnan(ema_arr)
+        if v.any():
+            ax1.plot(x[v], ema_arr[v], color=col, lw=1.0, alpha=0.85, label=lbl)
 
-    # Supporti / Resistenze
-    pr = max(highs) - min(lows)
-    for lv in res_lvls:
-        if min(lows) - pr * 0.1 < lv < max(highs) + pr * 0.1:
-            ax_c.axhline(lv, color='#e05c5c', linewidth=0.8, linestyle='--', alpha=0.7)
-            ax_c.text(n - 1, lv, f'R {lv:.2f}', color='#e05c5c',
-                      fontsize=7, va='bottom', ha='right')
-    for lv in sup_lvls:
-        if min(lows) - pr * 0.1 < lv < max(highs) + pr * 0.1:
-            ax_c.axhline(lv, color='#26a641', linewidth=0.8, linestyle='--', alpha=0.7)
-            ax_c.text(n - 1, lv, f'S {lv:.2f}', color='#26a641',
-                      fontsize=7, va='top', ha='right')
+    # Supporti e resistenze
+    for r in resistances:
+        ax1.axhline(r, color='#ff6b6b', lw=0.7, ls=':', alpha=0.7)
+    for s in supports:
+        ax1.axhline(s, color='#26a641', lw=0.7, ls=':', alpha=0.7)
 
-    # Ultimo prezzo
-    ax_c.axhline(closes[-1], color='#ffffff', linewidth=0.5, linestyle=':', alpha=0.5)
-    ax_c.text(0, closes[-1], f'{closes[-1]:.2f}', color='#ffffff', fontsize=8,
-              va='center', bbox=dict(facecolor='#21262d', edgecolor='none', pad=2))
+    ax1.set_xlim(-1, n)
+    ax1.legend(loc='upper left', fontsize=7, facecolor='#161b22',
+               labelcolor='#8b949e', framealpha=0.8)
 
-    ax_c.set_ylabel('Prezzo ($)', color='#8b949e', fontsize=9)
-    ax_c.legend(loc='upper left', fontsize=8, facecolor='#161b22',
-                edgecolor='#21262d', labelcolor='#c9d1d9')
-    ax_c.grid(axis='y', color='#21262d', linewidth=0.5)
-
-    # ── Volume ────────────────────────────────────────────────────────────
-    vcols = [col_up if closes[i] >= opens[i] else col_down for i in range(n)]
-    ax_v.bar(x, volumes, color=vcols, alpha=0.7, width=W)
-    ax_v.plot(x, vol_ma, color='#f0b429', linewidth=0.8)
-    ax_v.set_ylabel('Volume', color='#8b949e', fontsize=8)
-    ax_v.grid(axis='y', color='#21262d', linewidth=0.5)
-
-    # ── RSI ───────────────────────────────────────────────────────────────
-    ax_r.plot(x, rsi_v, color='#c9d1d9', linewidth=0.9)
-    ax_r.axhline(70, color='#e05c5c', linewidth=0.7, linestyle='--', alpha=0.7)
-    ax_r.axhline(30, color='#26a641', linewidth=0.7, linestyle='--', alpha=0.7)
-    ax_r.axhline(50, color='#8b949e', linewidth=0.5, linestyle=':', alpha=0.5)
-    ax_r.fill_between(x, rsi_v, 70, where=(rsi_v >= 70), alpha=0.2, color='#e05c5c')
-    ax_r.fill_between(x, rsi_v, 30, where=(rsi_v <= 30), alpha=0.2, color='#26a641')
-    ax_r.set_ylim(0, 100)
-    ax_r.set_ylabel('RSI 14', color='#8b949e', fontsize=8)
-    last_rsi = next((v for v in reversed(calc_rsi(closes)) if v is not None), None)
-    if last_rsi is not None:
-        ax_r.text(n - 1, last_rsi, f'{last_rsi:.1f}', color='#c9d1d9',
-                  fontsize=7, va='center', ha='right')
-    ax_r.grid(axis='y', color='#21262d', linewidth=0.5)
-
-    # ── MACD ──────────────────────────────────────────────────────────────
-    ax_m.plot(x, ml, color='#79c0ff', linewidth=0.9, label='MACD')
-    ax_m.plot(x, sl, color='#f0b429', linewidth=0.9, label='Signal')
-    hcols = [col_up if (not np.isnan(v) and v >= 0) else col_down for v in hist]
-    ax_m.bar(x, hist, color=hcols, alpha=0.7, width=W)
-    ax_m.axhline(0, color='#8b949e', linewidth=0.5)
-    ax_m.set_ylabel('MACD', color='#8b949e', fontsize=8)
-    ax_m.legend(loc='upper left', fontsize=7, facecolor='#161b22',
-                edgecolor='#21262d', labelcolor='#c9d1d9')
-    ax_m.grid(axis='y', color='#21262d', linewidth=0.5)
-
-    # ── Asse X ────────────────────────────────────────────────────────────
-    n_ticks  = max(2, min(12, n // 8))
-    tick_pos = [int(i) for i in np.linspace(0, n - 1, n_ticks)]
-    ax_m.set_xticks(tick_pos)
-    ax_m.set_xticklabels([fmt_date(dates[i]) for i in tick_pos],
-                          rotation=30, ha='right', fontsize=7, color='#8b949e')
-
-    # ── Titolo ────────────────────────────────────────────────────────────
-    change     = closes[-1] - closes[-2] if n > 1 else 0
-    change_pct = change / closes[-2] * 100 if n > 1 and closes[-2] else 0
-    arrow      = '▲' if change >= 0 else '▼'
-    fig.suptitle(
-        f"{symbol} — 15m   |   "
-        f"O: {opens[-1]:.2f}  H: {highs[-1]:.2f}  "
-        f"L: {lows[-1]:.2f}  C: {closes[-1]:.2f}  "
-        f"{arrow} {abs(change):.2f} ({abs(change_pct):.2f}%)",
-        color='#c9d1d9', fontsize=11, fontweight='bold', y=0.97
+    # Titolo
+    last_close = closes[-1]
+    pct_chg    = ((closes[-1] - closes[0]) / closes[0] * 100) if closes[0] != 0 else 0
+    sign       = '+' if pct_chg >= 0 else ''
+    tf_label   = TIMEFRAMES[timeframe]['label']
+    ax1.set_title(
+        f"{symbol}  ·  {tf_label}  ·  {n} candele  ·  "
+        f"Ultimo: {last_close:.4g}  ({sign}{pct_chg:.2f}%)",
+        color='#e6edf3', fontsize=11, pad=8, loc='left'
     )
-    fig.text(0.5, 0.005,
-             f"{fmt_date(dates[0])}  →  {fmt_date(dates[-1])}  ({n} candele)",
-             ha='center', color='#8b949e', fontsize=7)
+
+    # ── Pannello 2: Volume ───────────────────────────────────────────────
+    bar_colors = ['#26a641' if closes[i] >= opens[i] else '#f85149' for i in x]
+    ax2.bar(x, volumes, color=bar_colors, alpha=0.7, zorder=2)
+    v_ma_valid = ~np.isnan(vol_ma)
+    if v_ma_valid.any():
+        ax2.plot(x[v_ma_valid], vol_ma[v_ma_valid],
+                 color='#ffd700', lw=1.0, alpha=0.8, label='Vol MA20')
+    ax2.set_ylabel('Volume', fontsize=8)
+    ax2.legend(loc='upper left', fontsize=7, facecolor='#161b22',
+               labelcolor='#8b949e', framealpha=0.8)
+
+    # ── Pannello 3: RSI ──────────────────────────────────────────────────
+    rsi_valid = ~np.isnan(rsi)
+    if rsi_valid.any():
+        ax3.plot(x[rsi_valid], rsi[rsi_valid], color='#c9d1d9', lw=1.0)
+    ax3.axhline(70, color='#f85149', lw=0.7, ls='--', alpha=0.7)
+    ax3.axhline(30, color='#26a641', lw=0.7, ls='--', alpha=0.7)
+    ax3.fill_between(x[rsi_valid], rsi[rsi_valid], 70,
+                     where=rsi[rsi_valid] >= 70, alpha=0.15, color='#f85149')
+    ax3.fill_between(x[rsi_valid], rsi[rsi_valid], 30,
+                     where=rsi[rsi_valid] <= 30, alpha=0.15, color='#26a641')
+    ax3.set_ylim(0, 100)
+    ax3.set_ylabel('RSI 14', fontsize=8)
+    ax3.set_yticks([30, 50, 70])
+
+    # ── Pannello 4: MACD ─────────────────────────────────────────────────
+    macd_valid = ~np.isnan(macd_h)
+    if macd_valid.any():
+        hist_colors = ['#26a641' if v >= 0 else '#f85149' for v in macd_h[macd_valid]]
+        ax4.bar(x[macd_valid], macd_h[macd_valid], color=hist_colors, alpha=0.7, zorder=2)
+    ml_valid = ~np.isnan(macd_l)
+    ms_valid = ~np.isnan(macd_s)
+    if ml_valid.any():
+        ax4.plot(x[ml_valid], macd_l[ml_valid], color='#58a6ff', lw=1.0, label='MACD')
+    if ms_valid.any():
+        ax4.plot(x[ms_valid], macd_s[ms_valid], color='#ffd700', lw=1.0, label='Signal')
+    ax4.axhline(0, color='#30363d', lw=0.8)
+    ax4.set_ylabel('MACD', fontsize=8)
+    ax4.legend(loc='upper left', fontsize=7, facecolor='#161b22',
+               labelcolor='#8b949e', framealpha=0.8)
+
+    # ── Asse X ───────────────────────────────────────────────────────────
+    x_pos, x_lbl = _x_labels(timestamps, timeframe)
+    ax4.set_xticks(x_pos)
+    ax4.set_xticklabels(x_lbl, rotation=30, ha='right', fontsize=7)
+    plt.setp(ax1.get_xticklabels(), visible=False)
+    plt.setp(ax2.get_xticklabels(), visible=False)
+    plt.setp(ax3.get_xticklabels(), visible=False)
 
     return fig
 
-
 # ---------------------------------------------------------------------------
-# Main
+# Main standalone
 # ---------------------------------------------------------------------------
 
 def main():
+    # Risolve il path relativo ai dati rispetto alla posizione dello script
+    script_dir  = Path(__file__).parent
+    default_dir = str(script_dir / 'data' / 'candles')
+
     parser = argparse.ArgumentParser(
-        description='Grafico candlestick 15m — no pandas, solo matplotlib+numpy'
+        description='Grafico candlestick multi-timeframe da CSV 15m'
     )
     parser.add_argument('symbol',
-                        help='Simbolo da graficare (es: GOLD, SILVER, BTC)')
-    parser.add_argument('--bars',     type=int, default=120,
-                        help='Numero candele da visualizzare (default 120 ≈ 30h)')
-    parser.add_argument('--data-dir', default='data/candles',
-                        help='Directory base dei CSV (default: data/candles)')
-    parser.add_argument('--save',     metavar='FILE',
-                        help='Salva PNG invece di aprire la finestra interattiva')
+                        help='Simbolo da graficare (es. GOLD, BTC)')
+    parser.add_argument('--bars', type=int, default=None,
+                        help='Numero di candele da visualizzare (default: 120 per tutti i TF)')
+    parser.add_argument('--timeframe', choices=list(TIMEFRAMES.keys()), default='15m',
+                        help='Timeframe: 15m (default), 1H, 1D')
+    parser.add_argument('--save',
+                        help='Salva il grafico in questo file PNG invece di aprirlo')
+    parser.add_argument('--data-dir', default=default_dir,
+                        help=f'Directory base dei CSV (default: {default_dir})')
     args = parser.parse_args()
 
-    symbol   = args.symbol.upper()
-    data_dir = Path(args.data_dir)
+    symbol    = args.symbol.upper()
+    timeframe = args.timeframe
+    bars      = args.bars if args.bars is not None else DEFAULT_BARS[timeframe]
+    data_dir  = Path(args.data_dir)
+
+    print(f"📊 {symbol}  TF={timeframe}  bars={bars}  dir={data_dir}")
 
     try:
         csv_path = find_csv(symbol, data_dir)
     except FileNotFoundError as e:
-        print(f"❌ {e}", file=sys.stderr)
+        print(f"❌ {e}")
         sys.exit(1)
 
-    print(f"📂 {csv_path}")
-    data = load_csv(csv_path, args.bars)
-    print(f"📊 Candele totali: {data['total']}  |  Visualizzate: {len(data['closes'])}")
-    print(f"🕯 Da {data['dates'][0]}  a  {data['dates'][-1]}")
-    print(f"💰 Ultimo prezzo: {data['closes'][-1]:.4f}")
+    print(f"📂 CSV: {csv_path}")
 
-    fig = plot_chart(data, symbol)
+    try:
+        data = load_csv(csv_path, bars, timeframe)
+    except ValueError as e:
+        print(f"❌ {e}")
+        sys.exit(1)
+
+    n = len(data['closes'])
+    print(f"✅ Caricate {n} candele {timeframe}")
+
+    fig = plot_chart(data, symbol, timeframe)
 
     if args.save:
-        out = Path(args.save)
-        fig.savefig(out, dpi=150, bbox_inches='tight', facecolor='#0d1117')
-        print(f"✅ Salvato: {out}")
+        fig.savefig(args.save, dpi=110, bbox_inches='tight', facecolor='#0d1117')
+        print(f"💾 Salvato: {args.save}")
     else:
         plt.show()
+
+    plt.close(fig)
 
 
 if __name__ == '__main__':

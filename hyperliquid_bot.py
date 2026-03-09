@@ -510,7 +510,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/takeprofit SYM PX [sz|%]  — imposta take profit\n"
         "/orders                    — ordini condizionali attivi\n"
         "/cancelcond ID|all         — cancella ordine condizionale\n"
-        "/chart SYM [N]            — grafico candele 15m\n"
+        "/chart SYM [N] [TF]       — grafico candele (es: /chart GOLD 72 1H)\n"
         "/scan [SYM] [SCORE]       — scan VSA opportunità\n"
         "/scan daemon [SCORE]      — attiva scan automatico\n"
         "/scanstop                 — ferma scan automatico\n"
@@ -901,68 +901,83 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(msg)
 
-# =============================================================================
-# PATCH — aggiungi /chart a hyperliquid_bot.py
-#
-# STEP 1 — Aggiungi questi import in cima al file, dopo gli import esistenti:
-#
-#   import tempfile
-#   import matplotlib
-#   matplotlib.use('Agg')   # backend non-interattivo, obbligatorio su server
-#   import matplotlib.pyplot as plt
-#   import candle_chart as cc
-#
-# STEP 2 — Incolla la funzione chart_command qui sotto nel bot,
-#           vicino agli altri comandi (es. dopo stats())
-#
-# STEP 3 — Registra il handler in main(), dopo la riga cancelcond:
-#
-#   app.add_handler(CommandHandler("chart", chart_command))
-#
-# STEP 4 — Aggiungi il comando alla lista in start() / help_command():
-#
-#   "/chart SYM [N]            — grafico candele 15m (es: /chart GOLD 96)\n"
-#
-# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Timeframe validi (allineati con candle_chart.py)
+# ---------------------------------------------------------------------------
+VALID_TIMEFRAMES = {'15m', '1H', '1D'}
+
+DEFAULT_BARS_PER_TF = {
+    '15m': 120,
+    '1H':  120,
+    '1D':  120,
+}
 
 
 async def chart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    /chart SIMBOLO [BARRE]
-    Genera e invia un grafico candlestick 15m del simbolo richiesto.
+    /chart SIMBOLO [BARRE] [TIMEFRAME]
+
+    Genera e invia un grafico candlestick del simbolo richiesto.
+    Il timeframe può essere 15m (default), 1H o 1D; viene aggregato
+    automaticamente dalle candele 15m archiviate.
 
     Esempi:
-        /chart GOLD          — ultime 120 candele (~30h)
-        /chart SILVER 96     — ultime 96 candele (~24h)
-        /chart BTC 200
+        /chart GOLD            — 15m, 120 candele (~30h)
+        /chart GOLD 200        — 15m, 200 candele
+        /chart GOLD 1H         — 1H, 120 candele (~5 giorni)
+        /chart GOLD 72 1H      — 1H, 72 candele (3 giorni)
+        /chart GOLD 1D         — 1D, 120 candele (~4 mesi)
+        /chart GOLD 60 1D      — 1D, 60 giorni (~2 mesi)
     """
-    chat_id = update.effective_chat.id
-
     # ── Validazione argomenti ────────────────────────────────────────────
     if not context.args:
         await update.message.reply_text(
-            "📊 *Chart candlestick 15m*\n\n"
-            "Uso: `/chart SIMBOLO [BARRE]`\n\n"
+            "📊 *Chart candlestick multi-timeframe*\n\n"
+            "Uso: `/chart SIMBOLO [BARRE] [TIMEFRAME]`\n\n"
+            "Timeframe disponibili: `15m` (default) · `1H` · `1D`\n\n"
             "Esempi:\n"
-            "  `/chart GOLD`       — ultime 120 candele (~30h)\n"
-            "  `/chart SILVER 96`  — ultime 96 candele (~24h)\n"
-            "  `/chart BTC 200`",
+            "  `/chart GOLD`          — 15m, ~30h\n"
+            "  `/chart GOLD 200`      — 15m, 200 candele\n"
+            "  `/chart GOLD 1H`       — orario, ~5 giorni\n"
+            "  `/chart GOLD 72 1H`    — orario, 3 giorni\n"
+            "  `/chart GOLD 1D`       — giornaliero, ~4 mesi\n"
+            "  `/chart GOLD 60 1D`    — giornaliero, 2 mesi",
             parse_mode='Markdown'
         )
         return
 
-    symbol = context.args[0].upper()
+    symbol    = context.args[0].upper()
+    timeframe = '15m'
+    bars      = None
 
-    bars = 120
-    if len(context.args) > 1:
-        try:
-            bars = int(context.args[1])
-            if bars < 10 or bars > 500:
-                await update.message.reply_text("❌ Numero barre deve essere tra 10 e 500.")
+    # Parsing flessibile: gli argomenti dopo il simbolo possono essere
+    # in qualsiasi ordine tra numero-barre e timeframe
+    for arg in context.args[1:]:
+        if arg.upper() in VALID_TIMEFRAMES:
+            timeframe = arg.upper()
+        else:
+            try:
+                bars = int(arg)
+            except ValueError:
+                await update.message.reply_text(
+                    f"❌ Argomento non riconosciuto: `{arg}`\n"
+                    f"Timeframe validi: `15m`, `1H`, `1D`",
+                    parse_mode='Markdown'
+                )
                 return
-        except ValueError:
-            await update.message.reply_text("❌ Numero barre non valido.")
-            return
+
+    # Applica default barre per il timeframe scelto
+    if bars is None:
+        bars = DEFAULT_BARS_PER_TF[timeframe]
+
+    # Limiti
+    max_bars = {'15m': 500, '1H': 500, '1D': 365}
+    if bars < 10 or bars > max_bars[timeframe]:
+        await update.message.reply_text(
+            f"❌ Numero barre deve essere tra 10 e {max_bars[timeframe]} per timeframe {timeframe}."
+        )
+        return
 
     # ── Controlla che il CSV esista ──────────────────────────────────────
     try:
@@ -976,65 +991,64 @@ async def chart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ── Messaggio di attesa ──────────────────────────────────────────────
-    wait_msg = await update.message.reply_text(f"⏳ Generazione grafico *{symbol}*...",
-                                                parse_mode='Markdown')
+    tf_desc = {'15m': '15 minuti', '1H': 'orario', '1D': 'giornaliero'}
+    wait_msg = await update.message.reply_text(
+        f"⏳ Generazione grafico *{symbol}* ({tf_desc[timeframe]}, {bars} barre)...",
+        parse_mode='Markdown'
+    )
 
     tmp_path = None
     try:
-        # ── Carica dati e genera grafico ─────────────────────────────────
-        data = cc.load_csv(csv_path, bars)
+        # ── Carica dati (con aggregazione) e genera grafico ──────────────
+        data = cc.load_csv(csv_path, bars, timeframe)
         n    = len(data['closes'])
 
-        if n < 20:
+        if n < 10:
             await wait_msg.edit_text(
-                f"❌ Dati insufficienti per *{symbol}* ({n} candele disponibili, minimo 20).",
+                f"❌ Dati insufficienti per *{symbol}* "
+                f"({n} candele {timeframe} disponibili, minimo 10).",
                 parse_mode='Markdown'
             )
             return
 
-        fig = cc.plot_chart(data, symbol)
+        fig = cc.plot_chart(data, symbol, timeframe)
 
         # ── Salva in file temporaneo e invia ─────────────────────────────
-        with tempfile.NamedTemporaryFile(suffix='.png', delete=False, prefix=f'chart_{symbol}_') as tmp:
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
             tmp_path = tmp.name
 
-        fig.savefig(tmp_path, dpi=120, bbox_inches='tight', facecolor='#0d1117')
+        fig.savefig(tmp_path, dpi=110, bbox_inches='tight', facecolor='#0d1117')
         plt.close(fig)
 
-        # Caption con info essenziali
-        last_close = data['closes'][-1]
-        change     = data['closes'][-1] - data['closes'][-2] if n > 1 else 0
-        change_pct = change / data['closes'][-2] * 100 if n > 1 else 0
-        arrow      = '▲' if change >= 0 else '▼'
+        tf_label_map = {'15m': '15m', '1H': '1H', '1D': '1D'}
         caption = (
-            f"📊 *{symbol}* — 15m  |  {n} candele\n"
-            f"C: `{last_close:.2f}`  {arrow} `{abs(change):.2f}` (`{abs(change_pct):.2f}%`)\n"
-            f"Da: {data['dates'][0][:16]}  →  {data['dates'][-1][:16]}"
+            f"📊 *{symbol}* — {tf_label_map[timeframe]} — {n} candele\n"
+            f"Ultimo: `{data['closes'][-1]:.6g}`"
         )
 
-        await wait_msg.delete()
-        await update.message.reply_photo(
-            photo=open(tmp_path, 'rb'),
-            caption=caption,
-            parse_mode='Markdown'
-        )
-        logger.info(f"Chart inviato: {symbol} {n} candele → chat {chat_id}")
-
-    except Exception as e:
-        logger.error(f"Errore chart {symbol} chat {chat_id}: {e}", exc_info=True)
-        try:
-            await wait_msg.edit_text(
-                f"❌ Errore nella generazione del grafico per *{symbol}*:\n`{e}`",
+        with open(tmp_path, 'rb') as img:
+            await context.bot.send_photo(
+                chat_id=update.effective_chat.id,
+                photo=img,
+                caption=caption,
                 parse_mode='Markdown'
             )
-        except Exception:
-            pass
+        await wait_msg.delete()
 
+    except Exception as e:
+        logger.error(f"chart_command error {symbol} {timeframe}: {e}", exc_info=True)
+        await wait_msg.edit_text(
+            f"❌ Errore generando il grafico per *{symbol}*: {e}",
+            parse_mode='Markdown'
+        )
     finally:
-        # ── Pulizia file temporaneo ───────────────────────────────────────
         if tmp_path:
-            Path(tmp_path).unlink(missing_ok=True)
-
+            try:
+                import os
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+            
 # ---------------------------------------------------------------------------
 # Snapshot giornaliero prezzi
 # ---------------------------------------------------------------------------
