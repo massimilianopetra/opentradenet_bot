@@ -424,15 +424,20 @@ def _trendlines(highs: np.ndarray, lows: np.ndarray,
 
 def _deduplicate_lines(lines: list, tol: float, max_n: int) -> list:
     """
-    Rimuove trendline troppo simili (stesso valore finale entro 3×tol).
-    Conserva le migliori max_n per score.
+    Rimuove trendline troppo simili.
+    Due rette sono "uguali" solo se hanno CONTEMPORANEAMENTE:
+    - pendenza molto simile (entro 20% relativo)
+    - valore finale molto vicino (entro 8×tol)
+    Così rette con pendenze diverse ma stesso punto di arrivo vengono entrambe tenute.
     """
     kept = []
     for line in lines:
         too_close = False
         for k in kept:
-            # Stessa zona a fine chart = linea ridondante
-            if abs(line['y_end'] - k['y_end']) < tol * 3:
+            slope_ref   = abs(k['slope']) if abs(k['slope']) > 1e-9 else 1e-9
+            same_slope  = abs(line['slope'] - k['slope']) / slope_ref < 0.20
+            same_end    = abs(line['y_end'] - k['y_end']) < tol * 8
+            if same_slope and same_end:
                 too_close = True
                 break
         if not too_close:
@@ -713,48 +718,8 @@ def main():
         print(f"❌ {e}")
         sys.exit(1)
 
-    n      = len(data['closes'])
-    highs  = data['highs']
-    lows   = data['lows']
+    n = len(data['closes'])
     print(f"✅ Caricate {n} candele {timeframe}")
-
-    # ── DEBUG TRENDLINES ──────────────────────────────────────────────────
-    pwin = max(3, min(7, n // 20))
-    print(f"\n=== DEBUG TRENDLINES (n={n}, pwin={pwin}) ===")
-    res_piv = [(i, highs[i]) for i in range(pwin, n - pwin)
-               if highs[i] == np.max(highs[max(0, i - pwin):i + pwin + 1])]
-    sup_piv = [(i, lows[i])  for i in range(pwin, n - pwin)
-               if lows[i]  == np.min(lows[max(0,  i - pwin):i + pwin + 1])]
-    print(f"Pivot resistenza: {len(res_piv)}")
-    print(f"Pivot supporto:   {len(sup_piv)}")
-    mid_price = float(np.nanmedian((highs + lows) / 2))
-    tol       = mid_price * 0.5 / 100
-    viol_tol  = mid_price * 1.0 / 100
-    print(f"mid_price={mid_price:.4g}  tol={tol:.4g}  viol_tol={viol_tol:.4g}")
-    rejected_viol  = 0
-    rejected_touch = 0
-    accepted       = 0
-    for a in range(len(sup_piv)):
-        for b in range(a + 1, len(sup_piv)):
-            i1, v1 = sup_piv[a]
-            i2, v2 = sup_piv[b]
-            slope     = (v2 - v1) / (i2 - i1)
-            intercept = v1 - slope * i1
-            line      = slope * np.arange(i1, n) + intercept
-            n_viol    = int(np.sum(lows[i1:] < line - viol_tol))
-            touches   = int(np.sum(np.abs(lows[i1:] - line) <= tol))
-            if n_viol > 1:
-                rejected_viol += 1
-            elif touches < 2:
-                rejected_touch += 1
-            else:
-                accepted += 1
-                print(f"  ✅ SUP: i1={i1} i2={i2} slope={slope:.4g} "
-                      f"touches={touches} viol={n_viol}")
-    print(f"Accettate={accepted}  |  Scartate x violazioni={rejected_viol}  "
-          f"|  Scartate x pochi tocchi={rejected_touch}")
-    print("=== FINE DEBUG ===\n")
-    # ── FINE DEBUG ────────────────────────────────────────────────────────
 
     fig = plot_chart(data, symbol, timeframe)
 
