@@ -334,15 +334,12 @@ class HyperliquidClient:
         il bot è offline, con latenza di trigger in millisecondi.
 
         Funziona su perp standard (dex='') e su mercati xyz (dex='xyz').
-
-        Implementazione: chiamata HTTP diretta all'API /exchange invece di
-        exchange.order() dell'SDK, per evitare il bug di formattazione prezzi
-        ("Unknown format code 'f' for object of type 'str'") che si manifesta
-        con ordini trigger quando il prezzo limit è 0.
+        Per xyz usa _get_exchange_xyz() con Info(perp_dexs=[dex]) — obbligatorio
+        per il corretto mapping asset index (offset 110000+).
 
         Parametri:
           coin:       simbolo (es. 'GOLD', 'BTC')
-          trigger_px: prezzo trigger dello stop loss
+          trigger_px: prezzo trigger (float)
           dex:        '' per perp standard, 'xyz' per xyz
 
         Restituisce dict con:
@@ -351,15 +348,14 @@ class HyperliquidClient:
           '_trigger' — prezzo trigger impostato
           '_is_long' — True se la posizione era long
 
-        Nota: '_oid' può essere None se l'exchange non restituisce l'id nella risposta.
+        Nota: '_oid' può essere None se l'exchange non restituisce l'id.
         In quel caso la cancellazione va fatta dalla UI di Hyperliquid.
-        """
-        import requests
-        import eth_account
-        from hyperliquid.exchange import Exchange
-        from hyperliquid.info import Info
 
-        # Legge posizione aperta per ricavare size, direzione e asset index
+        Implementazione: usa exchange.order() dell'SDK passando trigger_px come
+        float (non stringa) sia come limit price che come triggerPx — questo è
+        il formato atteso internamente dall'SDK per evitare errori di formattazione.
+        """
+        # Legge posizione aperta per ricavare size e direzione
         pos_list = self.get_positions(extra_dexs=[dex] if dex else [])
         coin_up  = coin.upper()
         pos      = next((p for p in pos_list if p['coin'].upper() == coin_up), None)
@@ -368,79 +364,36 @@ class HyperliquidClient:
 
         total_size = abs(pos['size'])
         is_long    = pos['is_long']
-        # Lato chiusura: long → sell (False=0), short → buy (True=1)
+        # Lato chiusura: long → sell (False), short → buy (True)
         is_buy     = not is_long
 
-        # Ricava asset index dal meta dell'exchange
-        # Per xyz il nome interno è 'xyz:COIN', per perp è 'COIN'
-        internal_name = f"{dex}:{coin_up}" if dex else coin_up
-        meta_resp = requests.post(
-            f'{self.API_URL}/info',
-            json={'type': 'meta', 'dex': dex} if dex else {'type': 'meta'},
-            timeout=10
-        )
-        universe = meta_resp.json().get('universe', [])
-        asset_index = None
-        for i, asset in enumerate(universe):
-            name = asset.get('name', '')
-            # Il nome nel meta per xyz è 'xyz:COIN', per perp è 'COIN'
-            if name.upper() == internal_name.upper() or name.upper() == coin_up:
-                asset_index = i
-                break
-        if asset_index is None:
-            raise ValueError(f"Asset index non trovato per '{coin}' (dex='{dex}')")
-
-        # Per xyz l'asset index è offset di 110000
         if dex:
-            asset_index = asset_index + 110000
-
-        # Prepara e firma la richiesta tramite SDK Exchange (usa solo il signing, non order())
-        wallet   = eth_account.Account.from_key(self.private_key)
-        if dex:
-            info     = Info(self.API_URL, skip_ws=True, perp_dexs=[dex])
-            exchange = Exchange(wallet, self.API_URL,
-                                account_address=self.account_address,
-                                vault_address=None)
-            exchange.info = info
+            exchange = self._get_exchange_xyz(dex)
+            name     = f"{dex}:{coin_up}"
         else:
             exchange = self._get_exchange()
+            name     = coin_up
 
-        # Formatta trigger_px come stringa con precisione adeguata (evita notazione scientifica)
-        if trigger_px >= 1:
-            trigger_str = f"{trigger_px:.6f}".rstrip('0').rstrip('.')
-        else:
-            trigger_str = f"{trigger_px:.8f}".rstrip('0').rstrip('.')
-
-        # Formatta size come stringa
-        sz_dec   = self._get_sz_decimals(coin, dex)
-        size_str = f"{total_size:.{sz_dec}f}".rstrip('0').rstrip('.')
-
-        # Costruisce l'action direttamente (bypassa exchange.order() per evitare il bug fmt)
-        order_action = {
-            "type": "order",
-            "orders": [
-                {
-                    "a":  asset_index,       # asset index
-                    "b":  is_buy,            # True=buy, False=sell
-                    "p":  trigger_str,       # prezzo limit = trigger (richiesto dall'API anche per market)
-                    "s":  size_str,          # size
-                    "r":  True,              # reduce_only
-                    "t":  {
-                        "trigger": {
-                            "isMarket":  True,
-                            "triggerPx": trigger_str,
-                            "tpsl":      "sl"
-                        }
-                    }
-                }
-            ],
-            "grouping": "na"
+        # triggerPx deve essere float — l'SDK lo formatta internamente con :.8f
+        # Il prezzo limit (px) deve essere uguale al triggerPx per ordini trigger market
+        order_type = {
+            "trigger": {
+                "isMarket":  True,
+                "triggerPx": trigger_px,   # float, NON stringa
+                "tpsl":      "sl"
+            }
         }
 
-        # Firma e invia tramite il metodo _post dell'exchange SDK
-        result = exchange._post_action(order_action, None)
+        result = exchange.order(
+            name,
+            is_buy,
+            total_size,
+            trigger_px,    # limit px = trigger px (richiesto dall'SDK anche per isMarket=True)
+            order_type,
+            reduce_only=True
+        )
 
-        # Estrae oid dalla risposta
+        # Estrae oid dalla risposta SDK
         # Struttura: {"status":"ok","response":{"type":"order","data":{"statuses":[
         #   {"resting":{"oid": 12345}} oppure {"filled":{"oid":...}}
         # ]}}}
@@ -467,8 +420,8 @@ class HyperliquidClient:
         """
         Cancella uno Stop Loss nativo precedentemente inserito con set_stop_loss_native().
 
-        Usa _post_action diretto (stesso approccio di set_stop_loss_native) per
-        coerenza e per evitare potenziali bug di formattazione dell'SDK.
+        Usa exchange.cancel() dell'SDK — stesso approccio dei metodi esistenti.
+        Per xyz usa _get_exchange_xyz() con il nome interno 'xyz:COIN'.
 
         Parametri:
           coin: simbolo (es. 'GOLD', 'BTC')
@@ -478,54 +431,14 @@ class HyperliquidClient:
         Nota: se l'oid non è disponibile (es. bot riavviato senza persistenza),
         la cancellazione deve avvenire dalla UI di Hyperliquid.
         """
-        import requests
-        import eth_account
-        from hyperliquid.exchange import Exchange
-        from hyperliquid.info import Info
-
-        # Ricava asset index (stesso metodo di set_stop_loss_native)
-        coin_up       = coin.upper()
-        internal_name = f"{dex}:{coin_up}" if dex else coin_up
-        meta_resp = requests.post(
-            f'{self.API_URL}/info',
-            json={'type': 'meta', 'dex': dex} if dex else {'type': 'meta'},
-            timeout=10
-        )
-        universe = meta_resp.json().get('universe', [])
-        asset_index = None
-        for i, asset in enumerate(universe):
-            name = asset.get('name', '')
-            if name.upper() == internal_name.upper() or name.upper() == coin_up:
-                asset_index = i
-                break
-        if asset_index is None:
-            raise ValueError(f"Asset index non trovato per '{coin}' (dex='{dex}')")
-
         if dex:
-            asset_index = asset_index + 110000
-
-        # Prepara exchange per la firma
-        wallet = eth_account.Account.from_key(self.private_key)
-        if dex:
-            info     = Info(self.API_URL, skip_ws=True, perp_dexs=[dex])
-            exchange = Exchange(wallet, self.API_URL,
-                                account_address=self.account_address,
-                                vault_address=None)
-            exchange.info = info
+            exchange = self._get_exchange_xyz(dex)
+            name     = f"{dex}:{coin.upper()}"
         else:
             exchange = self._get_exchange()
+            name     = coin.upper()
 
-        cancel_action = {
-            "type":    "cancel",
-            "cancels": [
-                {
-                    "a": asset_index,
-                    "o": oid
-                }
-            ]
-        }
-
-        return exchange._post_action(cancel_action, None)
+        return exchange.cancel(name, oid)
 
     def _get_sz_decimals(self, coin: str, dex: str = '') -> int:
         """Numero di decimali per la size del simbolo."""
