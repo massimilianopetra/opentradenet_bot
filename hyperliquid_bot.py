@@ -344,16 +344,43 @@ class HyperliquidPriceMonitor:
             logger.error(f"Errore caricamento ordini condizionali {chat_id}: {e}")
 
     def load_all_conditional_orders(self) -> None:
-        """Carica gli ordini condizionali di tutti i wallet al boot."""
         COND_DIR.mkdir(parents=True, exist_ok=True)
         for chat_dir in COND_DIR.iterdir():
             if chat_dir.is_dir():
                 try:
-                    self.load_conditional_orders(int(chat_dir.name))
+                    cid = int(chat_dir.name)
+                    self.load_conditional_orders(cid)
+                    self.load_native_sl_orders(cid)   # <-- aggiungi questa riga
                 except Exception:
                     pass
-        # Arricchisce gli ordini senza is_long recuperando le posizioni dall'API
         self._fix_missing_is_long()
+
+    def _sl_path(self, chat_id: int) -> Path:
+        p = COND_DIR / str(chat_id)
+        p.mkdir(parents=True, exist_ok=True)
+        return p / 'native_sl_orders.json'
+
+    def save_native_sl_orders(self, chat_id: int) -> None:
+        import json
+        data = self.native_sl_orders.get(chat_id, {})
+        try:
+            self._sl_path(chat_id).write_text(
+                json.dumps(data, indent=2), encoding='utf-8'
+            )
+        except Exception as e:
+            logger.error(f"Errore salvataggio native_sl_orders {chat_id}: {e}")
+
+    def load_native_sl_orders(self, chat_id: int) -> None:
+        import json
+        path = self._sl_path(chat_id)
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text(encoding='utf-8'))
+            self.native_sl_orders[chat_id] = data
+            logger.info(f"Chat {chat_id}: caricati {len(data)} native SL orders")
+        except Exception as e:
+            logger.error(f"Errore caricamento native_sl_orders {chat_id}: {e}")
 
     def _fix_missing_is_long(self) -> None:
         """
@@ -1624,6 +1651,7 @@ async def stoploss_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'trigger_px': trigger_px,
                 'is_long':    result.get('_is_long', True),
             }
+            monitor.save_native_sl_orders(chat_id)   # <-- riga aggiunta
             oid_note = f"\noid: `{oid}` (usa /cancelsl {symbol} per rimuovere)"
         else:
             oid_note = "\n⚠️ oid non ricevuto — per cancellare usa la UI Hyperliquid"
@@ -1718,6 +1746,7 @@ async def cancelsl_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Rimuove dalla mappa locale
         sl_map.pop(symbol, None)
+        monitor.save_native_sl_orders(chat_id)   # <-- aggiungi questa riga
 
         await update.message.reply_text(
             f"✅ *Stop Loss cancellato*\n\n"
