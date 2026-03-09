@@ -4,12 +4,12 @@ Genera chart daily + 15m di un simbolo e li invia a Claude per analisi.
 Integrato nel bot tramite comando /analyze SIMBOLO.
 """
 
-import os
 import base64
 import logging
 import tempfile
 import csv as _csv
 from pathlib import Path
+from collections import defaultdict
 import aiohttp
 
 logger = logging.getLogger(__name__)
@@ -46,13 +46,7 @@ Sii conciso e diretto. Non aggiungere testo extra fuori da questo formato."""
 # Funzione principale
 # ---------------------------------------------------------------------------
 
-async def analyze_symbol(
-    symbol: str,
-    ml_score,
-    ml_signal,
-    candles_dir: Path,
-    anthropic_api_key: str
-):
+async def analyze_symbol(symbol, ml_score, ml_signal, candles_dir, anthropic_api_key):
     """
     Genera i chart e chiama Claude Vision per l'analisi.
     Returns: (testo_analisi, lista_path_chart_temporanei)
@@ -98,9 +92,7 @@ async def analyze_symbol(
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                ANTHROPIC_API_URL,
-                headers=headers,
-                json=payload,
+                ANTHROPIC_API_URL, headers=headers, json=payload,
                 timeout=aiohttp.ClientTimeout(total=60)
             ) as resp:
                 if resp.status != 200:
@@ -118,13 +110,79 @@ async def analyze_symbol(
 
 
 # ---------------------------------------------------------------------------
-# Generazione chart — usa le API reali di candle_chart.py:
-#   cc.load_csv(path, bars, timeframe)  → dict
-#   cc.resample_rows(rows, tf)          → rows ricampionate
-#   cc.plot_chart(data, symbol, timeframe) → Figure
+# Lettura CSV e ricampionamento daily (autonomo, senza dipendenze da cc)
 # ---------------------------------------------------------------------------
 
-def _generate_charts(symbol: str, candles_dir: Path):
+def _load_candles_csv(csv_path: Path) -> list:
+    """
+    Legge CSV candele formato: timestamp,open,high,low,close,volume
+    Ritorna lista di dict con valori già convertiti in float.
+    """
+    candles = []
+    try:
+        with open(csv_path, 'r', encoding='utf-8') as f:
+            reader = _csv.DictReader(f)
+            for row in reader:
+                try:
+                    candles.append({
+                        'timestamp': row['timestamp'],
+                        'open':   float(row['open']),
+                        'high':   float(row['high']),
+                        'low':    float(row['low']),
+                        'close':  float(row['close']),
+                        'volume': float(row['volume']),
+                    })
+                except Exception:
+                    continue
+    except Exception as e:
+        logger.error(f"Errore lettura CSV {csv_path}: {e}")
+    return candles
+
+
+def _resample_to_daily(candles_15m: list) -> list:
+    """
+    Ricampiona candele 15m in daily. Ritorna lista di dict.
+    Il timestamp è stringa 'YYYY-MM-DD 00:00:00' (primo quarto d'ora del giorno).
+    """
+    buckets = defaultdict(list)
+    for c in candles_15m:
+        # Prende solo la parte data come chiave bucket
+        day_key = c['timestamp'][:10]   # 'YYYY-MM-DD'
+        buckets[day_key].append(c)
+
+    daily = []
+    for day_key in sorted(buckets.keys()):
+        day_c = buckets[day_key]
+        daily.append({
+            'timestamp': f"{day_key} 00:00:00",
+            'open':   day_c[0]['open'],
+            'high':   max(c['high']   for c in day_c),
+            'low':    min(c['low']    for c in day_c),
+            'close':  day_c[-1]['close'],
+            'volume': sum(c['volume'] for c in day_c),
+        })
+    return daily
+
+
+def _write_temp_csv(candles: list) -> Path:
+    """Scrive lista di dict candele in un CSV temporaneo, ritorna il Path."""
+    tmp = tempfile.NamedTemporaryFile(
+        suffix='.csv', delete=False, mode='w', newline='', encoding='utf-8'
+    )
+    writer = _csv.writer(tmp)
+    writer.writerow(['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    for c in candles:
+        writer.writerow([c['timestamp'], c['open'], c['high'],
+                         c['low'], c['close'], c['volume']])
+    tmp.close()
+    return Path(tmp.name)
+
+
+# ---------------------------------------------------------------------------
+# Generazione chart — usa cc.load_csv + cc.plot_chart con CSV temp per il daily
+# ---------------------------------------------------------------------------
+
+def _generate_charts(symbol: str, candles_dir: Path) -> list:
     import candle_chart as cc
     import matplotlib.pyplot as plt
 
@@ -135,32 +193,29 @@ def _generate_charts(symbol: str, candles_dir: Path):
         logger.warning(f"CSV non trovato: {csv_path}")
         return []
 
+    # Carica tutte le candele 15m una volta sola
+    all_15m = _load_candles_csv(csv_path)
+    if len(all_15m) < 20:
+        logger.warning(f"Dati insufficienti per {sym}: {len(all_15m)} candele")
+        return []
+
     chart_paths = []
 
     # --- Chart 1: Daily ricostruito (ultimi 56 giorni) ---
     try:
-        # Carica abbastanza barre 15m per coprire 56 giorni (56*96 = 5376)
-        data_raw = cc.load_csv(csv_path, bars=5376, timeframe='15m')
-        if len(data_raw.get('closes', [])) >= 20:
-            # Ricostruisci le righe dal dict per passarle a resample_rows
-            rows_15m   = _data_dict_to_rows(data_raw)
-            rows_daily = cc.resample_rows(rows_15m, '1D')
-            rows_daily = rows_daily[-56:]
+        daily_candles = _resample_to_daily(all_15m)
+        daily_slice   = daily_candles[-56:]
 
-            # Scrivi CSV temp daily
-            tmp_csv = tempfile.NamedTemporaryFile(
-                suffix='.csv', delete=False, mode='w', newline='', encoding='utf-8'
+        tmp_csv = _write_temp_csv(daily_slice)
+        try:
+            data_daily = cc.load_csv(tmp_csv, bars=56, timeframe='1D')
+        finally:
+            tmp_csv.unlink(missing_ok=True)
+
+        if len(data_daily.get('closes', [])) >= 5:
+            tmp_png = tempfile.NamedTemporaryFile(
+                suffix='.png', delete=False, prefix=f'{sym}_daily_'
             )
-            writer = _csv.writer(tmp_csv)
-            writer.writerow(['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            writer.writerows(rows_daily)
-            tmp_csv.close()
-            tmp_csv_path = Path(tmp_csv.name)
-
-            data_daily = cc.load_csv(tmp_csv_path, bars=56, timeframe='1D')
-            tmp_csv_path.unlink(missing_ok=True)
-
-            tmp_png = tempfile.NamedTemporaryFile(suffix='.png', delete=False, prefix=f'{sym}_daily_')
             tmp_png.close()
             fig = cc.plot_chart(data_daily, symbol=sym, timeframe='1D')
             fig.savefig(tmp_png.name, dpi=130, bbox_inches='tight', facecolor='#0d1117')
@@ -174,8 +229,11 @@ def _generate_charts(symbol: str, candles_dir: Path):
     # --- Chart 2: 15m (ultime 120 candele) ---
     try:
         data_15m = cc.load_csv(csv_path, bars=120, timeframe='15m')
+
         if len(data_15m.get('closes', [])) >= 20:
-            tmp_png = tempfile.NamedTemporaryFile(suffix='.png', delete=False, prefix=f'{sym}_15m_')
+            tmp_png = tempfile.NamedTemporaryFile(
+                suffix='.png', delete=False, prefix=f'{sym}_15m_'
+            )
             tmp_png.close()
             fig = cc.plot_chart(data_15m, symbol=sym, timeframe='15m')
             fig.savefig(tmp_png.name, dpi=130, bbox_inches='tight', facecolor='#0d1117')
@@ -187,31 +245,6 @@ def _generate_charts(symbol: str, candles_dir: Path):
         logger.error(f"Errore generazione chart 15m {sym}: {e}")
 
     return chart_paths
-
-
-def _data_dict_to_rows(data: dict) -> list:
-    """
-    Converte il dict di cc.load_csv in lista di righe
-    [timestamp, open, high, low, close, volume] per cc.resample_rows.
-    """
-    timestamps = data.get('timestamps', [])
-    opens      = data.get('opens',      [])
-    highs      = data.get('highs',      [])
-    lows       = data.get('lows',       [])
-    closes     = data.get('closes',     [])
-    volumes    = data.get('volumes',    [])
-    n = len(timestamps)
-    rows = []
-    for i in range(n):
-        rows.append([
-            timestamps[i],
-            opens[i]   if i < len(opens)   else 0,
-            highs[i]   if i < len(highs)   else 0,
-            lows[i]    if i < len(lows)    else 0,
-            closes[i]  if i < len(closes)  else 0,
-            volumes[i] if i < len(volumes) else 0,
-        ])
-    return rows
 
 
 # ---------------------------------------------------------------------------
