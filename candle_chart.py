@@ -290,38 +290,67 @@ def _find_pivots(arr: np.ndarray, window: int = 5) -> list:
 def _trendlines(highs: np.ndarray, lows: np.ndarray,
                 n: int,
                 pivot_window: int = 5,
-                tolerance_pct: float = 0.5,
+                tolerance_pct: float = 0.6,
+                max_violation_pct: float = 1.2,
+                max_violations: int = 1,
                 min_touches: int = 2,
                 max_lines: int = 3,
                 extend_bars: int = 10) -> dict:
     """
     Calcola trendline di resistenza (su massimi) e supporto (su minimi).
 
-    Algoritmo:
-      1. Trova i pivot locali su highs (resistenze) e lows (supporti)
-      2. Per ogni coppia di pivot, calcola la retta passante per i due punti
-      3. Verifica che:
-         - la retta non venga violata significativamente tra i due pivot
-           (nessun prezzo supera la retta di più di tolerance_pct %)
-         - almeno min_touches prezzi si avvicinano alla retta entro tolerance_pct %
-      4. Assegna un punteggio = num_touches + recency_bonus
-      5. Restituisce le max_lines trendline migliori per tipo, estese di extend_bars
+    Differenza chiave resistenza vs supporto:
+    - Resistenza: nessun HIGH deve superare la retta di più di max_violation_pct%
+    - Supporto:   nessun LOW deve scendere sotto la retta di più di max_violation_pct%
+      (permettiamo max_violations brevi sfondamenti per wick anomale)
 
-    Returns:
-        dict con keys 'resistance' e 'support', ciascuno lista di dict:
-        {x_start, y_start, x_end, y_end, touches, slope}
+    La tolerance per i tocchi è calcolata sul prezzo medio (non sul range totale),
+    così funziona correttamente sia per BTC (~80k) sia per simboli < 1.
+
+    Args:
+        tolerance_pct:     % del prezzo medio per considerare un "tocco" alla retta
+        max_violation_pct: % del prezzo medio di violazione massima tollerata
+        max_violations:    numero massimo di candele che possono violare (wick anomale)
     """
     result = {'resistance': [], 'support': []}
 
-    price_range = np.nanmax(highs) - np.nanmin(lows)
-    if price_range == 0:
+    mid_price = float(np.nanmedian((highs + lows) / 2))
+    if mid_price == 0:
         return result
-    tol = price_range * tolerance_pct / 100.0
+
+    # Tolleranza assoluta proporzionale al prezzo corrente (non al range)
+    tol      = mid_price * tolerance_pct    / 100.0
+    viol_tol = mid_price * max_violation_pct / 100.0
+
+    # ── Helper: valuta una retta su un array di prezzi ───────────────────
+    def _evaluate_line(price_arr, i1, slope, intercept, above_is_bad: bool):
+        """
+        price_arr:     array dei prezzi da confrontare con la retta (highs o lows)
+        above_is_bad:  True per resistenza (sopra = violazione),
+                       False per supporto   (sotto = violazione)
+        Ritorna (valid, touches, n_violations)
+        """
+        xs   = np.arange(i1, n)
+        line = slope * xs + intercept
+
+        segment_prices = price_arr[i1:]
+        diff = segment_prices - line          # positivo = sopra la retta
+
+        if above_is_bad:
+            violations = np.sum(diff > viol_tol)
+        else:
+            violations = np.sum(diff < -viol_tol)
+
+        if violations > max_violations:
+            return False, 0, violations
+
+        touches = int(np.sum(np.abs(diff) <= tol))
+        return True, touches, violations
 
     # ── Resistenze: pivot sui massimi ────────────────────────────────────
     res_pivots = []
     for i in range(pivot_window, n - pivot_window):
-        if highs[i] == np.max(highs[i - pivot_window : i + pivot_window + 1]):
+        if highs[i] == np.max(highs[max(0, i - pivot_window) : i + pivot_window + 1]):
             res_pivots.append((i, highs[i]))
 
     res_lines = []
@@ -329,47 +358,35 @@ def _trendlines(highs: np.ndarray, lows: np.ndarray,
         for b in range(a + 1, len(res_pivots)):
             i1, v1 = res_pivots[a]
             i2, v2 = res_pivots[b]
-            if i2 == i1:
+            if i2 <= i1:
                 continue
             slope     = (v2 - v1) / (i2 - i1)
             intercept = v1 - slope * i1
 
-            # Valore della retta in ogni candela tra i1 e n
-            xs    = np.arange(i1, n)
-            line  = slope * xs + intercept
-
-            # Violazione: candele SOPRA la retta di resistenza
-            violated = np.any(highs[i1:] > line + tol)
-            if violated:
+            valid, touches, n_viol = _evaluate_line(highs, i1, slope, intercept,
+                                                    above_is_bad=True)
+            if not valid or touches < min_touches:
                 continue
 
-            # Conteggio tocchi: candele che sfiorano la retta (entro tol)
-            touches = int(np.sum(np.abs(highs[i1:] - line) <= tol))
-            if touches < min_touches:
-                continue
-
-            # Bonus recency: il pivot più recente vale di più
             recency = i2 / n
-
-            x_end = min(n - 1 + extend_bars, n + extend_bars - 1)
+            x_end   = n - 1 + extend_bars
             res_lines.append({
-                'x_start': i1,
-                'y_start': v1,
-                'x_end':   x_end,
-                'y_end':   slope * x_end + intercept,
-                'touches': touches,
-                'slope':   slope,
-                'score':   touches + recency * 2,
+                'x_start':  i1,
+                'y_start':  v1,
+                'x_end':    x_end,
+                'y_end':    slope * x_end + intercept,
+                'touches':  touches,
+                'slope':    slope,
+                'score':    touches + recency * 2 - n_viol * 0.5,
             })
 
-    # Ordina per score e prende le migliori, rimuovendo linee troppo simili
     res_lines.sort(key=lambda l: -l['score'])
-    result['resistance'] = _deduplicate_lines(res_lines, tol * 2, max_lines)
+    result['resistance'] = _deduplicate_lines(res_lines, tol, max_lines)
 
     # ── Supporti: pivot sui minimi ────────────────────────────────────────
     sup_pivots = []
     for i in range(pivot_window, n - pivot_window):
-        if lows[i] == np.min(lows[i - pivot_window : i + pivot_window + 1]):
+        if lows[i] == np.min(lows[max(0, i - pivot_window) : i + pivot_window + 1]):
             sup_pivots.append((i, lows[i]))
 
     sup_lines = []
@@ -377,54 +394,45 @@ def _trendlines(highs: np.ndarray, lows: np.ndarray,
         for b in range(a + 1, len(sup_pivots)):
             i1, v1 = sup_pivots[a]
             i2, v2 = sup_pivots[b]
-            if i2 == i1:
+            if i2 <= i1:
                 continue
             slope     = (v2 - v1) / (i2 - i1)
             intercept = v1 - slope * i1
 
-            xs   = np.arange(i1, n)
-            line = slope * xs + intercept
-
-            # Violazione: candele SOTTO la retta di supporto
-            violated = np.any(lows[i1:] < line - tol)
-            if violated:
-                continue
-
-            touches = int(np.sum(np.abs(lows[i1:] - line) <= tol))
-            if touches < min_touches:
+            valid, touches, n_viol = _evaluate_line(lows, i1, slope, intercept,
+                                                    above_is_bad=False)
+            if not valid or touches < min_touches:
                 continue
 
             recency = i2 / n
-            x_end   = min(n - 1 + extend_bars, n + extend_bars - 1)
+            x_end   = n - 1 + extend_bars
             sup_lines.append({
-                'x_start': i1,
-                'y_start': v1,
-                'x_end':   x_end,
-                'y_end':   slope * x_end + intercept,
-                'touches': touches,
-                'slope':   slope,
-                'score':   touches + recency * 2,
+                'x_start':  i1,
+                'y_start':  v1,
+                'x_end':    x_end,
+                'y_end':    slope * x_end + intercept,
+                'touches':  touches,
+                'slope':    slope,
+                'score':    touches + recency * 2 - n_viol * 0.5,
             })
 
     sup_lines.sort(key=lambda l: -l['score'])
-    result['support'] = _deduplicate_lines(sup_lines, tol * 2, max_lines)
+    result['support'] = _deduplicate_lines(sup_lines, tol, max_lines)
 
     return result
 
 
 def _deduplicate_lines(lines: list, tol: float, max_n: int) -> list:
     """
-    Rimuove trendline troppo simili (stessa pendenza e valori vicini a fine chart).
-    Conserva le migliori max_n.
+    Rimuove trendline troppo simili (stesso valore finale entro 3×tol).
+    Conserva le migliori max_n per score.
     """
     kept = []
     for line in lines:
         too_close = False
         for k in kept:
-            # Due linee "uguali" se hanno pendenza simile E valore finale simile
-            same_slope = abs(line['slope'] - k['slope']) < tol
-            same_end   = abs(line['y_end'] - k['y_end']) < tol * 3
-            if same_slope and same_end:
+            # Stessa zona a fine chart = linea ridondante
+            if abs(line['y_end'] - k['y_end']) < tol * 3:
                 too_close = True
                 break
         if not too_close:
@@ -507,7 +515,9 @@ def plot_chart(data: dict, symbol: str, timeframe: str = '15m') -> plt.Figure:
     pwin = max(3, min(7, n // 20))
     trendlines = _trendlines(highs, lows, n,
                              pivot_window=pwin,
-                             tolerance_pct=0.4,
+                             tolerance_pct=0.5,
+                             max_violation_pct=1.0,
+                             max_violations=1,
                              min_touches=2,
                              max_lines=3,
                              extend_bars=max(5, n // 10))
