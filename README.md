@@ -14,6 +14,9 @@ opentradenet/
 ├── generate_report.py           # Report HTML performance
 ├── fill_candles.py              # Riempie buchi nelle candele storiche
 ├── ml_features.py               # Feature engineering ML (candele → dataset)
+├── ml_trainer.py                # Training modello XGBoost
+├── ml_scanner.py                # Scanner opportunità (daemon 15m)
+├── ml_analyst.py                # Analisi tecnica AI via Claude Vision API
 ├── opentradenet.env             # Configurazione (da non committare)
 ├── opentradenet_bot.service     # Unit systemd
 ├── data/
@@ -43,10 +46,10 @@ pip install python-telegram-bot aiohttp python-dotenv cryptography \
             hyperliquid-python-sdk eth-account requests
 ```
 
-Per `candle_chart.py` e `ml_features.py` bastano `matplotlib` e `numpy`:
+Per `candle_chart.py`, `ml_features.py` e `ml_analyst.py`:
 
 ```bash
-pip install matplotlib numpy
+pip install matplotlib numpy xgboost
 ```
 
 Python 3.10+
@@ -93,6 +96,10 @@ WALLET_ALLOWED_CHATS=                    # es: 123456789,987654321
 CONDITIONAL_SNOOZE_SECS=300             # silenziamento dopo "Salta" (default 5 min)
 CONDITIONAL_RENOTIFY_SECS=120           # intervallo re-notifica (default 2 min)
 CONDITIONAL_TP_TRAILING_PCT=0.5         # % ritracciamento dal picco per trailing TP automatico
+
+# Analisi tecnica AI — Claude Vision (ml_analyst.py)
+ANTHROPIC_API_KEY=                       # sk-ant-... (da console.anthropic.com)
+ANALYZE_ALLOWED_CHATS=                   # chat_id autorizzati a /analyze (es: 123456789)
 ```
 
 ### Generare la chiave di cifratura
@@ -104,6 +111,15 @@ In alternativa:
 ```bash
 python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
+
+### Ottenere l'API key Anthropic
+
+1. Registrati su [console.anthropic.com](https://console.anthropic.com)
+2. Sezione **API Keys** → Create Key
+3. Copia subito la chiave (non sarà più visibile)
+4. Sezione **Billing** → aggiungi crediti (sistema prepagato, ~$0.004 per chiamata `/analyze`)
+
+Il tuo `chat_id` Telegram lo trovi scrivendo `/start` a `@userinfobot`.
 
 ---
 
@@ -169,35 +185,44 @@ sudo systemctl status opentradenet_bot
 | `/setkey 0x...` | Salva la private key API (cifrata su disco, messaggio auto-cancellato) |
 | `/walletinfo` | Mostra stato credenziali |
 
-> ⚠️ Invia `/setkey` solo in chat **privata** col bot. Il messaggio viene cancellato automaticamente dopo la ricezione.
+> ⚠️ Invia `/setkey` solo in chat **privata** col bot.
 
-**Come ottenere la API key su Hyperliquid:**
-1. Vai su [app.hyperliquid.xyz/API](https://app.hyperliquid.xyz/API)
-2. Genera un nuovo API wallet → copia la private key
-3. Autorizza l'API wallet firmando la transazione
-4. Usa `/setaddress` per il tuo account address principale (42 caratteri)
-5. Usa `/setkey` per la private key dell'API wallet
-
-La private key **non può prelevare fondi** — può solo aprire/chiudere posizioni.
-
-### Posizioni e trading
+### Trading
 
 | Comando | Descrizione |
 |---|---|
 | `/positions` | Posizioni aperte correnti |
-| `/posalert SIMBOLO X` | Alert se posizione varia ±X% |
-| `/buy SIMBOLO QTY [leverage]` | Apre long |
-| `/sell SIMBOLO QTY [leverage]` | Apre short |
-| `/close SIMBOLO` | Chiude posizione |
-| `/stoploss SIMBOLO PREZZO` | Imposta stop loss |
-| `/takeprofit SIMBOLO PREZZO` | Imposta take profit con trailing stop |
-| `/cancelcond SIMBOLO` | Cancella ordini condizionali attivi |
+| `/trackpositions` | Attiva/disattiva tracking automatico posizioni |
+| `/setleverage SYM N` | Imposta leva per un simbolo |
+| `/long SYM IMPORTO` | Apre long (es. `/long SOL 500`) |
+| `/short SYM IMPORTO` | Apre short |
+| `/close SYM` | Chiude posizione |
+| `/confirm` | Conferma ordine pendente |
+| `/cancelorder` | Annulla ordine pendente |
+
+### Ordini condizionali
+
+| Comando | Descrizione |
+|---|---|
+| `/stoploss SYM PREZZO` | Imposta stop loss (alert + chiusura) |
+| `/takeprofit SYM PREZZO` | Imposta take profit con trailing stop |
+| `/orders` | Lista ordini condizionali attivi |
+| `/cancelcond ID` | Cancella ordine condizionale |
 
 ### Grafici e analisi
 
 | Comando | Descrizione |
 |---|---|
-| `/chart SIMBOLO [BARRE]` | Grafico candlestick 15m (es. `/chart GOLD 96`) |
+| `/chart SYM [N]` | Grafico candlestick 15m (es. `/chart GOLD 96`) |
+| `/analyze SYM` | Analisi tecnica AI: chart daily + 15m + setup suggerito |
+
+### ML Scanner
+
+| Comando | Descrizione |
+|---|---|
+| `/scan [SYM] [SCORE] [daemon]` | Scansione opportunità ML |
+| `/scanstop` | Ferma scanner daemon |
+| `/scanstatus` | Stato scanner e ultimi segnali |
 
 ---
 
@@ -212,6 +237,7 @@ La private key **non può prelevare fondi** — può solo aprire/chiudere posizi
 | 🏁 **Posizione chiusa** | Posizione non più presente nell'API |
 | 🛑 **Stop Loss** | Prezzo ≤ soglia impostata con `/stoploss` |
 | 🎯 **Take Profit** | Prezzo ≥ soglia impostata con `/takeprofit` |
+| 🤖 **ML Scanner** | Opportunità LONG/SHORT rilevata con score ≥ soglia |
 
 ---
 
@@ -222,6 +248,7 @@ La private key **non può prelevare fondi** — può solo aprire/chiudere posizi
 - Il messaggio Telegram con `/setkey` viene **cancellato automaticamente** dopo la ricezione
 - L'API wallet Hyperliquid **non può prelevare fondi**, solo tradare
 - Puoi limitare l'accesso ai comandi wallet a specifici `chat_id` con `WALLET_ALLOWED_CHATS`
+- Il comando `/analyze` è accessibile solo ai `chat_id` in `ANALYZE_ALLOWED_CHATS` (costa API)
 
 ---
 
@@ -234,7 +261,10 @@ La private key **non può prelevare fondi** — può solo aprire/chiudere posizi
 | `candle_chart.py` | Grafico candlestick locale da CSV candele (no pandas) |
 | `generate_report.py` | Report HTML performance da CSV Hyperliquid |
 | `fill_candles.py` | Riempie buchi nelle candele storiche |
-| `ml_features.py` | Feature engineering ML su candele 15m |
+| `ml_features.py` | Feature engineering ML su candele 15m (48 feature per candela) |
+| `ml_trainer.py` | Training modello XGBoost su dataset ML |
+| `ml_scanner.py` | Scanner opportunità con alert Telegram (daemon 15m) |
+| `ml_analyst.py` | Analisi tecnica AI via Claude Vision (usato da `/analyze`) |
 | `opentradenet.env` | Configurazione (da non committare) |
 | `opentradenet_bot.service` | Unit systemd |
 
@@ -268,208 +298,72 @@ python3 candle_chart.py GOLD --save gold_chart.png    # salva PNG
 python3 candle_chart.py GOLD --data-dir /altro/path   # directory custom
 ```
 
-### Argomenti
-
-| Argomento | Default | Descrizione |
-|---|---|---|
-| `symbol` | (obbligatorio) | Simbolo da graficare (es. GOLD, SILVER, BTC) |
-| `--bars N` | `120` | Numero di candele da visualizzare (≈ 30h a 15m) |
-| `--data-dir PATH` | `data/candles` | Directory base dei file CSV |
-| `--save FILE` | — | Salva PNG invece di aprire la finestra interattiva |
-
-### Indicatori inclusi
-
-- **Candele OHLC** colorate (verde rialzo / rosso ribasso)
-- **Bollinger Bands** (periodo 20, deviazione ×2)
-- **EMA 9** (giallo), **EMA 21** (rosso), **EMA 50** (azzurro)
-- **Supporti e resistenze automatici** da pivot locali (ultimi 4 per tipo)
-- **Volume** con media mobile a 20 periodi
-- **RSI 14** con zone overbought (>70) e oversold (<30)
-- **MACD** (12/26/9) con istogramma
-
 ---
 
-## Report performance — `generate_report.py`
+## Pipeline ML
 
-Script standalone che genera un report HTML interattivo dal CSV della trade history esportato da Hyperliquid.
+La pipeline ML è composta da script modulari indipendenti, eseguibili in sequenza.
 
-```bash
-python3 generate_report.py trade_history.csv
-python3 generate_report.py trade_history.csv -o report_febbraio.html
-python3 generate_report.py trade_history.csv --open   # apre nel browser
-```
+### 1. Feature engineering — `ml_features.py`
 
-Il report include: P&L netto, win rate, profit factor, P&L per simbolo, split Long/Short e PERP/XYZ, timeline, tabella completa trade e posizioni ancora aperte.
-
----
-
-## Fill candele — `fill_candles.py`
-
-Recupera le candele storiche mancanti da Hyperliquid e le aggiunge ai CSV esistenti senza toccare il bot.
+Produce 48 feature per candela da CSV 15m: EMA/RSI/MACD/Bollinger/ATR, struttura candela, momentum, volumi, 18 pattern candlestick binari, contesto temporale ciclico.
 
 ```bash
-python3 fill_candles.py                  # usa opentradenet.env, ultimi 14 giorni
-python3 fill_candles.py --days 30        # recupera fino a 30 giorni fa
-python3 fill_candles.py --symbol BTC     # solo un simbolo
-python3 fill_candles.py --dry-run        # mostra buchi senza scrivere
-```
-
----
-
-## ML Feature Engineering — `ml_features.py`
-
-Script standalone che legge i CSV candele 15m e produce un dataset con **48 feature tecniche + label** pronto per il training di modelli ML (XGBoost, Random Forest ecc.).
-
-Non richiede dipendenze nuove — usa solo `matplotlib` e `numpy` già presenti nel progetto. Tutti gli indicatori sono implementati in Python puro.
-
-### A cosa serve
-
-`ml_features.py` è il primo passo del pipeline ML. **Non produce segnali di trading** — analizza lo storico candele e risponde alla domanda:
-
-> *"Quando il prezzo è poi salito/sceso di almeno X% nelle 4 ore successive, cosa stavano facendo gli indicatori in quel momento?"*
-
-L'output (grafici + dataset CSV) serve a capire quali feature sono predittive su ogni simbolo, e a preparare i dati per allenare un modello che in futuro manderà alert Telegram LONG/SHORT.
-
-### Uso rapido
-
-```bash
-# Tutti i simboli — soglia automatica — solo testo (CONSIGLIATO per 300+ simboli)
-python3 ml_features.py --horizon 16 --auto-threshold --no-charts --quiet
-
-# Come sopra + salva dataset CSV per il training ML
 python3 ml_features.py --horizon 16 --auto-threshold --no-charts --quiet --save-csv
-
-# Solo un simbolo con grafici
-python3 ml_features.py --symbol BTC --horizon 16 --auto-threshold
-
-# Soglia manuale fissa per tutti i simboli
-python3 ml_features.py --horizon 16 --threshold 0.015
 ```
 
-### Argomenti
-
-| Argomento | Default | Descrizione |
-|---|---|---|
-| `--data-dir PATH` | `data/candles` | Directory base dei CSV candele |
-| `--symbol SYM` | — | Processa solo questo simbolo |
-| `--horizon N` | `4` | Candele future per il label (N × 15min = orizzonte previsione) |
-| `--threshold F` | `0.003` | Soglia manuale % per LONG/SHORT (es. `0.015` = 1.5%) |
-| `--auto-threshold` | off | Calcola soglia adattiva per simbolo (target ~62% NEUTRO) |
-| `--save-csv` | off | Salva dataset in `ml_reports/SIMBOLO_dataset.csv` |
-| `--no-charts` | off | Non generare PNG (molto più veloce su 300+ simboli) |
-| `--quiet` | off | Output minimale: una riga per simbolo + tabella finale |
-
-### Horizon — come si calcola
-
-L'horizon è espresso in **numero di candele**, non in ore. Con candele a 15 minuti:
-
-```
---horizon 4   →   1 ora avanti
---horizon 8   →   2 ore avanti
---horizon 16  →   4 ore avanti  (consigliato)
---horizon 32  →   8 ore avanti
---horizon 96  →  24 ore avanti
-
-Formula: ore desiderate × 4 = horizon
-```
-
-### Label
-
-Per ogni candela all'istante T, il label guarda il prezzo a T+horizon:
-
-```
-future_return = (close[T+horizon] - close[T]) / close[T]
-
-label = +1  (LONG)   se future_return > +soglia
-label = -1  (SHORT)  se future_return < -soglia
-label =  0  (NEUTRO) altrimenti
-```
-
-La distribuzione ottimale è circa **62% NEUTRO, 19% LONG, 19% SHORT**. Con `--auto-threshold` la soglia viene calcolata automaticamente per ogni simbolo per avvicinarsi a questo target — necessario perché crypto e azionari hanno volatilità molto diverse.
-
-### Feature calcolate (48 totali)
-
-**Struttura candela corrente (6):** `body_ratio`, `upper_wick_ratio`, `lower_wick_ratio`, `close_position`, `is_bullish`, `range_pct`
-
-**Momentum (3):** `ret_1`, `ret_3`, `ret_5` — return % su 1, 3, 5 candele passate
-
-**Indicatori tecnici (10):** distanza % da EMA9/21/50, cross EMA9 vs EMA21, posizione nelle BB, larghezza BB, RSI 14, MACD histogram, variazione MACD histogram, ATR %
-
-**Volume (2):** `vol_ratio` (vs SMA20), `vol_ratio_5` (vs SMA5)
-
-**Sequenza (5):** direzione ultime 3 candele, candele consecutive rialziste/ribassiste
-
-**Pattern candlestick (18):**
-- Singola candela: `pat_doji`, `pat_hammer`, `pat_inverted_hammer`, `pat_marubozu_bull`, `pat_marubozu_bear`, `pat_spinning_top`
-- Due candele: `pat_engulfing_bull`, `pat_engulfing_bear`, `pat_harami_bull`, `pat_harami_bear`, `pat_tweezer_bottom`, `pat_tweezer_top`, `pat_piercing_line`, `pat_dark_cloud_cover`
-- Tre candele: `pat_morning_star`, `pat_evening_star`, `pat_three_white_soldiers`, `pat_three_black_crows`
-
-**Contesto temporale (4):** ora UTC e giorno della settimana codificati ciclicamente (sin/cos)
-
-### Output prodotto
-
-Tutti i file vengono salvati in `ml_reports/`:
-
-| File | Descrizione |
+| Argomento | Descrizione |
 |---|---|
-| `summary.txt` | Tabella riepilogativa di tutti i simboli: campioni, % LONG/SHORT/NEUTRO, soglia usata, top feature |
-| `SIMBOLO_features.png` | Grafici analisi (6 pannelli, vedi sotto) |
-| `SIMBOLO_dataset.csv` | Dataset pronto per training ML (con `--save-csv`) |
+| `--horizon N` | Orizzonte predizione in candele (ore × 4, es. 4h = 16) |
+| `--auto-threshold` | Soglia LONG/SHORT adattiva per simbolo (target ~62% NEUTRO) |
+| `--no-charts` | Disabilita grafici (obbligatorio per 300+ simboli) |
+| `--quiet` | Output minimale |
+| `--save-csv` | Salva dataset in `ml_reports/` |
 
-### Grafici — cosa leggere
+### 2. Training — `ml_trainer.py`
 
-I grafici PNG (generati senza `--no-charts`) mostrano 6 pannelli:
+Training XGBoost sul dataset prodotto da `ml_features.py`.
 
-**Pannello 1 — Distribuzione label (torta):** mostra se il simbolo è bilanciato tra LONG/SHORT/NEUTRO. Un forte squilibrio (es. LONG 35% SHORT 8%) indica un bias storico rialzista — il modello ne terrà conto.
-
-**Pannello 2 — Istogramma return futuro:** la forma della curva indica quanto è prevedibile il simbolo. Una campana larga con due gobbe è più favorevole al ML di una campana stretta centrata sullo zero.
-
-**Pannello 3 — RSI medio per label:** se LONG ha RSI basso e SHORT ha RSI alto, la strategia oversold/overbought funziona su quel simbolo. Se i valori sono simili, RSI non è predittivo.
-
-**Pannello 4 — Posizione BB per label:** se LONG ha `bb_position` bassa (vicino alla banda inferiore) il simbolo è mean-reverting. Se LONG ha `bb_position` alta, è momentum/breakout. Cambia tutto nell'approccio al trading.
-
-**Pannello 5 — Volume ratio per label:** se i movimenti forti (LONG/SHORT) hanno volume ratio alto e NEUTRO ha volume basso, il volume è un filtro affidabile anche per il trading manuale.
-
-**Pannello 6 — Pannello 6 — Correlazioni feature → label:** il pannello più importante. Mostra quali dei 48 indicatori sono più predittivi su quel simbolo specifico. Il segno indica la direzione: correlazione negativa su RSI significa "RSI alto → short, RSI basso → long". Usalo per capire la "personalità" del simbolo.
-
-### Esempio output `--quiet`
-
-```
-  [  1/300]  AAPL         elapsed=0s   ETA=120s
-  [ 10/300]  BTC          elapsed=12s  ETA=108s
-  ...
-  ────────────────────────────────────────────────────────────
-  SIMBOLO      CAMPIONI   LONG%  SHORT%  NEUTRO%  SOGLIA
-  AAPL             1640   19.1%   18.8%    62.1%   1.23%
-  BTC              1650   19.4%   19.2%    61.4%   2.87%
-  HYPE             1645   18.9%   19.3%    61.8%   1.91%
-  INTC             1638   19.0%   19.1%    61.9%   0.87%
-  ...
-  ════════════════════════════════════════════════════════════
-  ✅ Completato in 87.3s
-  Simboli OK : 298
+```bash
+python3 ml_trainer.py
 ```
 
-### Note tecniche
+### 3. Scanner — `ml_scanner.py`
 
-- Il file usa `matplotlib.use('Agg')` per funzionare correttamente come servizio systemd senza display
-- Il path `data/candles` viene risolto relativamente alla posizione dello script (compatibile con systemd)
-- Tutti gli indicatori (EMA, RSI, MACD, BB, ATR) sono implementati in Python puro — numpy usato solo dove richiesto da matplotlib
-- I pattern candlestick sono tutti binari (0/1) e non richiedono librerie esterne come `ta-lib`
-- Con `--no-charts --quiet` il tempo di esecuzione su 300 simboli è tipicamente 1-3 minuti
+Daemon che ogni 15 minuti valuta tutti i simboli e invia alert Telegram per opportunità LONG/SHORT con score ≥ soglia.
 
----
+Attivabile anche via bot con `/scan daemon`.
 
-## Trailing stop automatico
+### 4. Analisi AI — `ml_analyst.py`
 
-Il take profit supporta un trailing stop opzionale: quando il prezzo supera il target e poi ritraccia della percentuale configurata, la posizione viene chiusa automaticamente senza intervento manuale.
+Modulo richiamato dal comando `/analyze`. Genera chart daily (ricostruito da 15m) e chart 15m, li invia alla Claude Vision API e riceve un'analisi tecnica strutturata con entry/stop/target suggeriti.
 
-```env
-CONDITIONAL_TP_TRAILING_PCT=0.5   # % ritracciamento dal picco → chiusura automatica
+**Flusso:**
+1. Legge CSV candele 15m del simbolo
+2. Ricampiona in daily (ultimi 56 giorni)
+3. Genera i due PNG con `candle_chart.py`
+4. Chiama Claude API (modello Haiku, vision)
+5. Restituisce testo analisi + path chart al bot
+6. Il bot invia chart + analisi su Telegram
+
+**Costo stimato:** ~$0.004 per chiamata (modello Haiku).
+
+**Output esempio:**
 ```
+📊 SOL — Analisi Tecnica
 
----
+🔵 DAILY: Trend ribassista, EMA in ordine discendente, RSI 43 in recupero da oversold.
+  Supporto TL-S attivo, resistenza area 87-90.
+🟢 15m: Struttura minimi crescenti, TL-R rispettata. MACD positivo.
+  Volume spike rialzista confermato.
 
-## Licenza
+🤖 Bias: LONG
 
-MIT
+📐 Setup suggerito:
+• Entry: 83.5 - 84.0
+• Stop: 81.5 (-2.9%)
+• Target 1: 87.5 (+4.1%) → R:R 1:1.4
+• Target 2: 90.0 (+7.1%) → R:R 1:2.4
+
+⚠️ Contro-trend daily — size ridotta consigliata
+```
