@@ -273,6 +273,166 @@ def _pivot_levels(highs: np.ndarray, lows: np.ndarray, window: int = 5, max_leve
     supports    = sorted(set(round(s, 6) for s in supports))[:max_levels]
     return resistances, supports
 
+
+def _find_pivots(arr: np.ndarray, window: int = 5) -> list:
+    """
+    Ritorna lista di (indice, valore) dei pivot locali nell'array.
+    """
+    pivots = []
+    n = len(arr)
+    for i in range(window, n - window):
+        segment = arr[i - window : i + window + 1]
+        if arr[i] == segment.max() or arr[i] == segment.min():
+            pivots.append((i, arr[i]))
+    return pivots
+
+
+def _trendlines(highs: np.ndarray, lows: np.ndarray,
+                n: int,
+                pivot_window: int = 5,
+                tolerance_pct: float = 0.5,
+                min_touches: int = 2,
+                max_lines: int = 3,
+                extend_bars: int = 10) -> dict:
+    """
+    Calcola trendline di resistenza (su massimi) e supporto (su minimi).
+
+    Algoritmo:
+      1. Trova i pivot locali su highs (resistenze) e lows (supporti)
+      2. Per ogni coppia di pivot, calcola la retta passante per i due punti
+      3. Verifica che:
+         - la retta non venga violata significativamente tra i due pivot
+           (nessun prezzo supera la retta di più di tolerance_pct %)
+         - almeno min_touches prezzi si avvicinano alla retta entro tolerance_pct %
+      4. Assegna un punteggio = num_touches + recency_bonus
+      5. Restituisce le max_lines trendline migliori per tipo, estese di extend_bars
+
+    Returns:
+        dict con keys 'resistance' e 'support', ciascuno lista di dict:
+        {x_start, y_start, x_end, y_end, touches, slope}
+    """
+    result = {'resistance': [], 'support': []}
+
+    price_range = np.nanmax(highs) - np.nanmin(lows)
+    if price_range == 0:
+        return result
+    tol = price_range * tolerance_pct / 100.0
+
+    # ── Resistenze: pivot sui massimi ────────────────────────────────────
+    res_pivots = []
+    for i in range(pivot_window, n - pivot_window):
+        if highs[i] == np.max(highs[i - pivot_window : i + pivot_window + 1]):
+            res_pivots.append((i, highs[i]))
+
+    res_lines = []
+    for a in range(len(res_pivots)):
+        for b in range(a + 1, len(res_pivots)):
+            i1, v1 = res_pivots[a]
+            i2, v2 = res_pivots[b]
+            if i2 == i1:
+                continue
+            slope     = (v2 - v1) / (i2 - i1)
+            intercept = v1 - slope * i1
+
+            # Valore della retta in ogni candela tra i1 e n
+            xs    = np.arange(i1, n)
+            line  = slope * xs + intercept
+
+            # Violazione: candele SOPRA la retta di resistenza
+            violated = np.any(highs[i1:] > line + tol)
+            if violated:
+                continue
+
+            # Conteggio tocchi: candele che sfiorano la retta (entro tol)
+            touches = int(np.sum(np.abs(highs[i1:] - line) <= tol))
+            if touches < min_touches:
+                continue
+
+            # Bonus recency: il pivot più recente vale di più
+            recency = i2 / n
+
+            x_end = min(n - 1 + extend_bars, n + extend_bars - 1)
+            res_lines.append({
+                'x_start': i1,
+                'y_start': v1,
+                'x_end':   x_end,
+                'y_end':   slope * x_end + intercept,
+                'touches': touches,
+                'slope':   slope,
+                'score':   touches + recency * 2,
+            })
+
+    # Ordina per score e prende le migliori, rimuovendo linee troppo simili
+    res_lines.sort(key=lambda l: -l['score'])
+    result['resistance'] = _deduplicate_lines(res_lines, tol * 2, max_lines)
+
+    # ── Supporti: pivot sui minimi ────────────────────────────────────────
+    sup_pivots = []
+    for i in range(pivot_window, n - pivot_window):
+        if lows[i] == np.min(lows[i - pivot_window : i + pivot_window + 1]):
+            sup_pivots.append((i, lows[i]))
+
+    sup_lines = []
+    for a in range(len(sup_pivots)):
+        for b in range(a + 1, len(sup_pivots)):
+            i1, v1 = sup_pivots[a]
+            i2, v2 = sup_pivots[b]
+            if i2 == i1:
+                continue
+            slope     = (v2 - v1) / (i2 - i1)
+            intercept = v1 - slope * i1
+
+            xs   = np.arange(i1, n)
+            line = slope * xs + intercept
+
+            # Violazione: candele SOTTO la retta di supporto
+            violated = np.any(lows[i1:] < line - tol)
+            if violated:
+                continue
+
+            touches = int(np.sum(np.abs(lows[i1:] - line) <= tol))
+            if touches < min_touches:
+                continue
+
+            recency = i2 / n
+            x_end   = min(n - 1 + extend_bars, n + extend_bars - 1)
+            sup_lines.append({
+                'x_start': i1,
+                'y_start': v1,
+                'x_end':   x_end,
+                'y_end':   slope * x_end + intercept,
+                'touches': touches,
+                'slope':   slope,
+                'score':   touches + recency * 2,
+            })
+
+    sup_lines.sort(key=lambda l: -l['score'])
+    result['support'] = _deduplicate_lines(sup_lines, tol * 2, max_lines)
+
+    return result
+
+
+def _deduplicate_lines(lines: list, tol: float, max_n: int) -> list:
+    """
+    Rimuove trendline troppo simili (stessa pendenza e valori vicini a fine chart).
+    Conserva le migliori max_n.
+    """
+    kept = []
+    for line in lines:
+        too_close = False
+        for k in kept:
+            # Due linee "uguali" se hanno pendenza simile E valore finale simile
+            same_slope = abs(line['slope'] - k['slope']) < tol
+            same_end   = abs(line['y_end'] - k['y_end']) < tol * 3
+            if same_slope and same_end:
+                too_close = True
+                break
+        if not too_close:
+            kept.append(line)
+        if len(kept) >= max_n:
+            break
+    return kept
+
 # ---------------------------------------------------------------------------
 # Formattazione etichette asse X per ogni timeframe
 # ---------------------------------------------------------------------------
@@ -343,6 +503,14 @@ def plot_chart(data: dict, symbol: str, timeframe: str = '15m') -> plt.Figure:
     for i in range(19, n):
         vol_ma[i] = np.mean(volumes[i - 19 : i + 1])
     resistances, supports = _pivot_levels(highs, lows)
+    # Trendline dinamiche (adatta pivot_window al numero di candele disponibili)
+    pwin = max(3, min(7, n // 20))
+    trendlines = _trendlines(highs, lows, n,
+                             pivot_window=pwin,
+                             tolerance_pct=0.4,
+                             min_touches=2,
+                             max_lines=3,
+                             extend_bars=max(5, n // 10))
 
     # ── Layout ──────────────────────────────────────────────────────────
     fig = plt.figure(figsize=(16, 12), facecolor='#0d1117')
@@ -392,11 +560,37 @@ def plot_chart(data: dict, symbol: str, timeframe: str = '15m') -> plt.Figure:
         if v.any():
             ax1.plot(x[v], ema_arr[v], color=col, lw=1.0, alpha=0.85, label=lbl)
 
-    # Supporti e resistenze
+    # Supporti e resistenze orizzontali (livelli)
     for r in resistances:
         ax1.axhline(r, color='#ff6b6b', lw=0.7, ls=':', alpha=0.7)
     for s in supports:
         ax1.axhline(s, color='#26a641', lw=0.7, ls=':', alpha=0.7)
+
+    # Trendline dinamiche (rette inclinate su pivot)
+    # Resistenza: arancio tratteggiato — più spessa se più tocchi
+    for i, tl in enumerate(trendlines['resistance']):
+        lw    = 1.0 + min(tl['touches'] - 2, 3) * 0.3   # spessore cresce con i tocchi
+        alpha = 0.55 + min(tl['touches'] - 2, 4) * 0.08
+        ax1.plot([tl['x_start'], tl['x_end']],
+                 [tl['y_start'], tl['y_end']],
+                 color='#ff9500', lw=lw, ls='--', alpha=alpha,
+                 label=f"TL-R ({tl['touches']})" if i == 0 else None,
+                 zorder=4)
+        # Pallino sul pivot di ancoraggio
+        ax1.scatter(tl['x_start'], tl['y_start'],
+                    color='#ff9500', s=18, zorder=5, alpha=0.8)
+
+    # Supporto: viola tratteggiato
+    for i, tl in enumerate(trendlines['support']):
+        lw    = 1.0 + min(tl['touches'] - 2, 3) * 0.3
+        alpha = 0.55 + min(tl['touches'] - 2, 4) * 0.08
+        ax1.plot([tl['x_start'], tl['x_end']],
+                 [tl['y_start'], tl['y_end']],
+                 color='#b09fd8', lw=lw, ls='--', alpha=alpha,
+                 label=f"TL-S ({tl['touches']})" if i == 0 else None,
+                 zorder=4)
+        ax1.scatter(tl['x_start'], tl['y_start'],
+                    color='#b09fd8', s=18, zorder=5, alpha=0.8)
 
     ax1.set_xlim(-1, n)
     ax1.legend(loc='upper left', fontsize=7, facecolor='#161b22',
