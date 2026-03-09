@@ -713,8 +713,48 @@ def main():
         print(f"❌ {e}")
         sys.exit(1)
 
-    n = len(data['closes'])
+    n      = len(data['closes'])
+    highs  = data['highs']
+    lows   = data['lows']
     print(f"✅ Caricate {n} candele {timeframe}")
+
+    # ── DEBUG TRENDLINES ──────────────────────────────────────────────────
+    pwin = max(3, min(7, n // 20))
+    print(f"\n=== DEBUG TRENDLINES (n={n}, pwin={pwin}) ===")
+    res_piv = [(i, highs[i]) for i in range(pwin, n - pwin)
+               if highs[i] == np.max(highs[max(0, i - pwin):i + pwin + 1])]
+    sup_piv = [(i, lows[i])  for i in range(pwin, n - pwin)
+               if lows[i]  == np.min(lows[max(0,  i - pwin):i + pwin + 1])]
+    print(f"Pivot resistenza: {len(res_piv)}")
+    print(f"Pivot supporto:   {len(sup_piv)}")
+    mid_price = float(np.nanmedian((highs + lows) / 2))
+    tol       = mid_price * 0.5 / 100
+    viol_tol  = mid_price * 1.0 / 100
+    print(f"mid_price={mid_price:.4g}  tol={tol:.4g}  viol_tol={viol_tol:.4g}")
+    rejected_viol  = 0
+    rejected_touch = 0
+    accepted       = 0
+    for a in range(len(sup_piv)):
+        for b in range(a + 1, len(sup_piv)):
+            i1, v1 = sup_piv[a]
+            i2, v2 = sup_piv[b]
+            slope     = (v2 - v1) / (i2 - i1)
+            intercept = v1 - slope * i1
+            line      = slope * np.arange(i1, n) + intercept
+            n_viol    = int(np.sum(lows[i1:] < line - viol_tol))
+            touches   = int(np.sum(np.abs(lows[i1:] - line) <= tol))
+            if n_viol > 1:
+                rejected_viol += 1
+            elif touches < 2:
+                rejected_touch += 1
+            else:
+                accepted += 1
+                print(f"  ✅ SUP: i1={i1} i2={i2} slope={slope:.4g} "
+                      f"touches={touches} viol={n_viol}")
+    print(f"Accettate={accepted}  |  Scartate x violazioni={rejected_viol}  "
+          f"|  Scartate x pochi tocchi={rejected_touch}")
+    print("=== FINE DEBUG ===\n")
+    # ── FINE DEBUG ────────────────────────────────────────────────────────
 
     fig = plot_chart(data, symbol, timeframe)
 
