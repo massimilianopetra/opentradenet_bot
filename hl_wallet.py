@@ -234,7 +234,13 @@ class HyperliquidClient:
             return exchange.update_leverage(leverage, coin, is_cross)
 
     def _get_exchange_xyz(self, dex: str):
-        """Exchange configurato per un dex xyz."""
+        """
+        Exchange configurato per un dex xyz.
+        Usa perp_dexs=[dex] nell'Info così l'SDK carica i simboli xyz
+        con il corretto asset index offset (110000+).
+        Necessario per tutti gli ordini su mercati xyz (market_open,
+        market_close, set_stop_loss_native, cancel_stop_loss_native).
+        """
         import eth_account
         from hyperliquid.exchange import Exchange
         from hyperliquid.info import Info
@@ -320,6 +326,120 @@ class HyperliquidClient:
         result['_size']  = close_size
         result['_total'] = total_size
         return result
+
+    def set_stop_loss_native(self, coin: str, trigger_px: float, dex: str = '') -> dict:
+        """
+        Inserisce uno Stop Loss nativo sull'exchange Hyperliquid (trigger order tpsl='sl').
+        L'ordine viene gestito direttamente dall'exchange: rimane attivo anche se
+        il bot è offline, con latenza di trigger in millisecondi.
+
+        Funziona su perp standard (dex='') e su mercati xyz (dex='xyz'):
+        - Per xyz usa _get_exchange_xyz() che configura Info con perp_dexs=[dex],
+          necessario per il corretto mapping dell'asset index (offset 110000+).
+        - Il nome interno per xyz è 'xyz:COIN' (es. 'xyz:GOLD').
+
+        Parametri:
+          coin:       simbolo (es. 'GOLD', 'BTC')
+          trigger_px: prezzo trigger dello stop loss
+          dex:        '' per perp standard, 'xyz' per xyz
+
+        Restituisce dict con:
+          '_oid'     — order id exchange (int), necessario per cancel_stop_loss_native()
+          '_size'    — size della posizione chiusa
+          '_trigger' — prezzo trigger impostato
+          '_is_long' — True se la posizione era long
+
+        Nota: '_oid' può essere None se l'exchange non restituisce l'id nella risposta
+        (caso raro). In quel caso la cancellazione va fatta dalla UI di Hyperliquid.
+        """
+        # Legge posizione aperta per ricavare size e direzione
+        pos_list = self.get_positions(extra_dexs=[dex] if dex else [])
+        coin_up  = coin.upper()
+        pos      = next((p for p in pos_list if p['coin'].upper() == coin_up), None)
+        if pos is None:
+            raise ValueError(f"Nessuna posizione aperta su {coin}")
+
+        total_size = abs(pos['size'])
+        is_long    = pos['is_long']
+        # Lato dell'ordine di chiusura: se long → sell (False), se short → buy (True)
+        is_buy     = not is_long
+
+        if dex:
+            exchange = self._get_exchange_xyz(dex)
+            name     = f"{dex}:{coin_up}"
+        else:
+            exchange = self._get_exchange()
+            name     = coin_up
+
+        # Ordine trigger con tpsl='sl':
+        #   isMarket=True  → esecuzione market al trigger (nessun slippage limit)
+        #   triggerPx      → prezzo che attiva l'ordine
+        #   tpsl='sl'      → classificato come stop loss (visibile nella UI HL)
+        #   reduce_only    → non può aprire una nuova posizione per errore
+        order_type = {
+            "trigger": {
+                "isMarket":  True,
+                "triggerPx": str(trigger_px),
+                "tpsl":      "sl"
+            }
+        }
+
+        result = exchange.order(
+            name,
+            is_buy,
+            total_size,
+            0.0,           # prezzo limit ignorato quando isMarket=True
+            order_type,
+            reduce_only=True
+        )
+
+        # Estrae oid dalla risposta SDK.
+        # Struttura attesa:
+        #   {"status":"ok","response":{"type":"order","data":{"statuses":[
+        #     {"resting":{"oid": 12345}} oppure {"filled":{"oid": 12345, ...}}
+        #   ]}}}
+        oid = None
+        try:
+            statuses = result['response']['data']['statuses']
+            for s in statuses:
+                if 'resting' in s:
+                    oid = s['resting']['oid']
+                    break
+                elif 'filled' in s:
+                    oid = s['filled'].get('oid')
+                    break
+        except Exception:
+            pass  # oid rimane None, il bot lo segnala nel messaggio di conferma
+
+        result['_oid']     = oid
+        result['_size']    = total_size
+        result['_trigger'] = trigger_px
+        result['_is_long'] = is_long
+        return result
+
+    def cancel_stop_loss_native(self, coin: str, oid: int, dex: str = '') -> dict:
+        """
+        Cancella uno Stop Loss nativo precedentemente inserito con set_stop_loss_native().
+
+        Parametri:
+          coin: simbolo (es. 'GOLD', 'BTC')
+          oid:  order id restituito da set_stop_loss_native() come result['_oid']
+          dex:  '' per perp standard, 'xyz' per xyz
+
+        Per xyz usa _get_exchange_xyz() con il nome interno 'xyz:COIN',
+        identico al pattern usato in tutti gli altri metodi di trading xyz.
+
+        Nota: se l'oid non è disponibile (es. bot riavviato senza persistenza),
+        la cancellazione deve avvenire dalla UI di Hyperliquid.
+        """
+        if dex:
+            exchange = self._get_exchange_xyz(dex)
+            name     = f"{dex}:{coin.upper()}"
+        else:
+            exchange = self._get_exchange()
+            name     = coin.upper()
+
+        return exchange.cancel(name, oid)
 
     def _get_sz_decimals(self, coin: str, dex: str = '') -> int:
         """Numero di decimali per la size del simbolo."""

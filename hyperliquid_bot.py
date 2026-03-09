@@ -184,6 +184,8 @@ class HyperliquidPriceMonitor:
         self.scanner_enabled:   bool  = False   # daemon attivo?
         self.scanner_min_score: int   = 60      # soglia score
         self.scanner_chat_ids:  set   = set()   # chat_id che ricevono alert scanner
+        # SL nativi: {chat_id: {symbol: {'oid': int, 'dex': str, 'trigger_px': float, 'is_long': bool}}}
+        self.native_sl_orders: dict = {}
 
     async def init_session(self):
         if self.session is None:
@@ -513,10 +515,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/close SYM [%|importo]     — chiude posizione (tutto/parziale)\n"
         "/confirm                   — conferma ordine pendente\n"
         "/cancelorder               — annulla ordine pendente\n"
-        "/stoploss SYM PX [sz|%]    — imposta stop loss\n"
-        "/takeprofit SYM PX [sz|%]  — imposta take profit\n"
-        "/orders                    — ordini condizionali attivi\n"
-        "/cancelcond ID|all         — cancella ordine condizionale\n"
+        "/stoploss SYM PX           — stop loss nativo su Hyperliquid\n"
+        "/cancelsl SYM              — cancella stop loss nativo\n"
+        "/takeprofit SYM PX [sz|%]  — take profit con trailing stop\n"
+        "/orders                    — ordini condizionali attivi (TP)\n"
+        "/cancelcond ID|all         — cancella ordine take profit\n"
         "/chart SYM [N] [TF]       — grafico candele (es: /chart GOLD 72 1H)\n"
         "/analyze SYM              — analisi tecnica AI daily+15m con setup suggerito\n"
         "/scan [SYM] [SCORE]       — scan VSA opportunità\n"
@@ -1532,14 +1535,187 @@ def _cond_label(order: dict) -> str:
 
 async def stoploss_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    /stoploss SIMBOLO PREZZO [importo|%]
+    /stoploss SIMBOLO PREZZO
+    Inserisce uno Stop Loss NATIVO su Hyperliquid.
+    L'ordine rimane attivo sull'exchange anche se il bot è offline.
     Es: /stoploss GOLD 5100
-        /stoploss GOLD 5100 200     — chiudi $200
-        /stoploss GOLD 5100 50%     — chiudi 50%
-    Triggera quando prezzo <= PREZZO.
+        /stoploss BTC 80000
     """
-    await _set_conditional(update, context, 'stoploss')
+    chat_id = update.effective_chat.id
+    if not _is_wallet_allowed(chat_id):
+        await update.message.reply_text("❌ Non autorizzato.")
+        return
 
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "🛑 *Stop Loss Nativo*\n\n"
+            "Uso: /stoploss SIMBOLO PREZZO\n\n"
+            "L'ordine viene inserito direttamente su Hyperliquid.\n"
+            "Rimane attivo anche se il bot è offline.\n\n"
+            "Esempi:\n"
+            "  /stoploss GOLD 5100\n"
+            "  /stoploss BTC 80000",
+            parse_mode='Markdown'
+        )
+        return
+
+    addr = wallet_store.get_address(chat_id)
+    key  = wallet_store.get_key(chat_id)
+    if not addr:
+        await update.message.reply_text("❌ Imposta prima /setaddress")
+        return
+    if not key:
+        await update.message.reply_text("❌ Imposta prima /setkey per usare comandi di trading.")
+        return
+
+    symbol = context.args[0].upper()
+    try:
+        trigger_px = float(context.args[1].replace(',', '.'))
+    except ValueError:
+        await update.message.reply_text("❌ Prezzo non valido.")
+        return
+
+    # Validazione: verifica posizione aperta e direzione
+    track = monitor.position_tracks.get(chat_id, {}).get(symbol)
+    price_result = await monitor.get_price(symbol)
+    current_px   = price_result[0] if price_result else (track['entry_px'] if track else None)
+
+    if current_px:
+        is_long = track['is_long'] if track else True
+        if is_long and trigger_px >= current_px:
+            await update.message.reply_text(
+                f"❌ Stop Loss LONG deve essere *sotto* il prezzo attuale\n"
+                f"Attuale: ${_fmt(current_px)} — inserisci un valore inferiore",
+                parse_mode='Markdown')
+            return
+        if not is_long and trigger_px <= current_px:
+            await update.message.reply_text(
+                f"❌ Stop Loss SHORT deve essere *sopra* il prezzo attuale\n"
+                f"Attuale: ${_fmt(current_px)} — inserisci un valore superiore",
+                parse_mode='Markdown')
+            return
+
+    dex = await _detect_dex(symbol)
+    market_s = f"_{dex.upper()}_" if dex else "PERP"
+
+    await update.message.reply_text(f"⏳ Inserimento Stop Loss nativo su Hyperliquid...")
+
+    try:
+        client = HyperliquidClient(addr, private_key=key)
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: client.set_stop_loss_native(symbol, trigger_px, dex)
+        )
+        logger.info(f"SL NATIVE {symbol} trigger=${trigger_px} chat {chat_id}: {result}")
+
+        if isinstance(result, dict) and result.get('status') == 'err':
+            await update.message.reply_text(
+                f"❌ Errore exchange: {result.get('response', result)}")
+            return
+
+        size      = result.get('_size', '?')
+        direction = "LONG" if result.get('_is_long') else "SHORT"
+
+        await update.message.reply_text(
+            f"✅ *Stop Loss nativo inserito*\n\n"
+            f"🛑 SL *{symbol}* {market_s} ({direction})\n"
+            f"Trigger: ${_fmt(trigger_px)}\n"
+            f"Size: {size}\n"
+            f"⚙️ Gestito da Hyperliquid — attivo anche offline\n"
+            f"⏰ {datetime.now().strftime('%H:%M:%S')}",
+            parse_mode='Markdown'
+        )
+
+    except Exception as e:
+        logger.error(f"Errore set_stop_loss_native {symbol} chat {chat_id}: {e}")
+        await update.message.reply_text(f"❌ Errore: {e}")
+
+async def cancelsl_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /cancelsl SIMBOLO
+    Cancella lo Stop Loss nativo precedentemente inserito su Hyperliquid.
+    Es: /cancelsl GOLD
+        /cancelsl BTC
+    """
+    chat_id = update.effective_chat.id
+    if not _is_wallet_allowed(chat_id):
+        await update.message.reply_text("❌ Non autorizzato.")
+        return
+
+    if not context.args:
+        # Lista SL attivi se nessun simbolo fornito
+        sl_map = monitor.native_sl_orders.get(chat_id, {})
+        if not sl_map:
+            await update.message.reply_text(
+                "ℹ️ Nessun Stop Loss nativo attivo registrato dal bot.\n\n"
+                "Nota: SL inseriti direttamente da UI Hyperliquid non sono visibili qui.",
+                parse_mode='Markdown'
+            )
+            return
+        lines = []
+        for sym, info in sl_map.items():
+            mkt   = f"_{info['dex'].upper()}_" if info['dex'] else "PERP"
+            dir_s = "L" if info['is_long'] else "S"
+            lines.append(f"🛑 *{sym}* {mkt} ({dir_s}) trigger ${_fmt(info['trigger_px'])}  oid `{info['oid']}`")
+        await update.message.reply_text(
+            "🛑 *Stop Loss nativi attivi*\n\n" + "\n".join(lines) +
+            "\n\nUsa /cancelsl SIMBOLO per cancellarne uno.",
+            parse_mode='Markdown'
+        )
+        return
+
+    addr = wallet_store.get_address(chat_id)
+    key  = wallet_store.get_key(chat_id)
+    if not addr:
+        await update.message.reply_text("❌ Imposta prima /setaddress")
+        return
+    if not key:
+        await update.message.reply_text("❌ Imposta prima /setkey")
+        return
+
+    symbol = context.args[0].upper()
+    sl_map = monitor.native_sl_orders.get(chat_id, {})
+    sl_info = sl_map.get(symbol)
+
+    if not sl_info:
+        await update.message.reply_text(
+            f"❌ Nessun Stop Loss nativo registrato per *{symbol}*.\n\n"
+            f"Se l'hai inserito da un'altra sessione o dalla UI, cancellalo direttamente su Hyperliquid.",
+            parse_mode='Markdown'
+        )
+        return
+
+    oid = sl_info['oid']
+    dex = sl_info['dex']
+    market_s = f"_{dex.upper()}_" if dex else "PERP"
+
+    await update.message.reply_text(f"⏳ Cancellazione Stop Loss *{symbol}* {market_s}...", parse_mode='Markdown')
+
+    try:
+        client = HyperliquidClient(addr, private_key=key)
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: client.cancel_stop_loss_native(symbol, oid, dex)
+        )
+        logger.info(f"CANCEL SL NATIVE {symbol} oid={oid} chat {chat_id}: {result}")
+
+        if isinstance(result, dict) and result.get('status') == 'err':
+            await update.message.reply_text(
+                f"❌ Errore exchange: {result.get('response', result)}")
+            return
+
+        # Rimuove dalla mappa locale
+        sl_map.pop(symbol, None)
+
+        await update.message.reply_text(
+            f"✅ *Stop Loss cancellato*\n\n"
+            f"🛑 SL *{symbol}* {market_s} rimosso dall'exchange\n"
+            f"Trigger era: ${_fmt(sl_info['trigger_px'])}\n"
+            f"⏰ {datetime.now().strftime('%H:%M:%S')}",
+            parse_mode='Markdown'
+        )
+
+    except Exception as e:
+        logger.error(f"Errore cancel_stop_loss_native {symbol} oid={oid} chat {chat_id}: {e}")
+        await update.message.reply_text(f"❌ Errore: {e}")
 
 async def takeprofit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -3298,6 +3474,7 @@ def main():
     app.add_handler(CommandHandler("analyze",      analyze_command))
     app.add_handler(CommandHandler("scanstop",     scanstop_command))
     app.add_handler(CommandHandler("scanstatus",   scanstatus_command))
+    app.add_handler(CommandHandler("cancelsl", cancelsl_command))
 
     app.post_init     = post_init
     app.post_shutdown = post_shutdown
