@@ -1614,13 +1614,27 @@ async def stoploss_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         size      = result.get('_size', '?')
         direction = "LONG" if result.get('_is_long') else "SHORT"
+        oid       = result.get('_oid')
+
+        # Salva oid in memoria per poterlo cancellare con /cancelsl
+        if oid is not None:
+            monitor.native_sl_orders.setdefault(chat_id, {})[symbol] = {
+                'oid':        oid,
+                'dex':        dex,
+                'trigger_px': trigger_px,
+                'is_long':    result.get('_is_long', True),
+            }
+            oid_note = f"\noid: `{oid}` (usa /cancelsl {symbol} per rimuovere)"
+        else:
+            oid_note = "\n⚠️ oid non ricevuto — per cancellare usa la UI Hyperliquid"
 
         await update.message.reply_text(
             f"✅ *Stop Loss nativo inserito*\n\n"
             f"🛑 SL *{symbol}* {market_s} ({direction})\n"
             f"Trigger: ${_fmt(trigger_px)}\n"
             f"Size: {size}\n"
-            f"⚙️ Gestito da Hyperliquid — attivo anche offline\n"
+            f"⚙️ Gestito da Hyperliquid — attivo anche offline"
+            f"{oid_note}\n"
             f"⏰ {datetime.now().strftime('%H:%M:%S')}",
             parse_mode='Markdown'
         )
