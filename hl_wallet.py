@@ -364,7 +364,8 @@ class HyperliquidClient:
 
         total_size = abs(pos['size'])
         is_long    = pos['is_long']
-        # Lato chiusura: long → sell (False), short → buy (True)
+        # Lato chiusura: per chiudere un long si vende (is_buy=False),
+        # per chiudere uno short si compra (is_buy=True)
         is_buy     = not is_long
 
         if dex:
