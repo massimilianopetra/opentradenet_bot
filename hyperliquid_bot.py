@@ -555,6 +555,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/scanstatus               — stato scanner\n"
         "/stats — statistiche bot\n"
         "/help — questo messaggio\n"
+        f"\n📌 Il tuo chat\\_id: `{update.effective_chat.id}`"
     )
     await update.message.reply_text(msg, parse_mode='Markdown')
 
