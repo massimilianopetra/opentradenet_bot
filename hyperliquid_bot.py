@@ -18,6 +18,7 @@ matplotlib.use('Agg')   # ← fondamentale su server senza display
 import matplotlib.pyplot as plt
 import candle_chart as cc
 import importlib, ml_scanner as _mls
+import ml_analyst
 
 # ---------------------------------------------------------------------------
 # Configurazione ambiente
@@ -118,6 +119,12 @@ CONDITIONAL_TP_TRAILING_PCT = float(os.getenv('CONDITIONAL_TP_TRAILING_PCT', '0.
 # Es: WALLET_ALLOWED_CHATS=123456789,987654321
 # Se vuoto: tutti gli utenti possono registrare le loro credenziali
 WALLET_ALLOWED_CHATS = {int(x.strip()) for x in os.getenv('WALLET_ALLOWED_CHATS', '').split(',') if x.strip()}
+
+# API key Anthropic per /analyze (Claude Vision)
+ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY', '')
+
+# Whitelist chat_id autorizzati a usare /analyze (solo uso personale)
+ANALYZE_ALLOWED_CHATS = {int(x.strip()) for x in os.getenv('ANALYZE_ALLOWED_CHATS', '').split(',') if x.strip()}
 
 # Chiave di cifratura per le private key su disco (Fernet AES-128)
 # Se non presente nel .env viene generata automaticamente al primo avvio e stampata in log
@@ -511,6 +518,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/orders                    — ordini condizionali attivi\n"
         "/cancelcond ID|all         — cancella ordine condizionale\n"
         "/chart SYM [N] [TF]       — grafico candele (es: /chart GOLD 72 1H)\n"
+        "/analyze SYM              — analisi tecnica AI daily+15m con setup suggerito\n"
         "/scan [SYM] [SCORE]       — scan VSA opportunità\n"
         "/scan daemon [SCORE]      — attiva scan automatico\n"
         "/scanstop                 — ferma scan automatico\n"
@@ -1048,7 +1056,7 @@ async def chart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 os.unlink(tmp_path)
             except Exception:
                 pass
-            
+
 # ---------------------------------------------------------------------------
 # Snapshot giornaliero prezzi
 # ---------------------------------------------------------------------------
@@ -3178,6 +3186,75 @@ async def post_init(application: Application):
     asyncio.create_task(position_tracking_task(application))
     asyncio.create_task(candle_task(application))
 
+async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/analyze SIMBOLO — Analisi tecnica AI con chart daily + 15m."""
+    chat_id = update.effective_chat.id
+
+    if ANALYZE_ALLOWED_CHATS and chat_id not in ANALYZE_ALLOWED_CHATS:
+        await update.message.reply_text("⛔ Non sei autorizzato a usare /analyze.")
+        return
+
+    if not ANTHROPIC_API_KEY:
+        await update.message.reply_text("❌ ANTHROPIC_API_KEY non configurata nel .env")
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "📊 Uso: /analyze SIMBOLO\nEsempio: /analyze SOL\n\n"
+            "Genera analisi tecnica AI con chart daily + 15m e setup suggerito."
+        )
+        return
+
+    symbol = context.args[0].upper()
+    thinking_msg = await update.message.reply_text(
+        f"🔍 Analisi {symbol} in corso... (~15s)"
+    )
+
+    ml_score, ml_signal = None, None
+    try:
+        scores = _mls.get_latest_scores()
+        if symbol in scores:
+            ml_score  = scores[symbol].get('score')
+            ml_signal = scores[symbol].get('signal')
+    except Exception:
+        pass
+
+    analysis_text, chart_paths = await ml_analyst.analyze_symbol(
+        symbol=symbol,
+        ml_score=ml_score,
+        ml_signal=ml_signal,
+        candles_dir=CANDLES_DIR,
+        anthropic_api_key=ANTHROPIC_API_KEY
+    )
+
+    try:
+        await thinking_msg.delete()
+    except Exception:
+        pass
+
+    if chart_paths:
+        from telegram import InputMediaPhoto
+        media = []
+        for i, path in enumerate(chart_paths):
+            try:
+                with open(path, 'rb') as f:
+                    img_bytes = f.read()
+                caption = analysis_text if i == len(chart_paths) - 1 else None
+                media.append(InputMediaPhoto(media=img_bytes, caption=caption))
+            except Exception as e:
+                logger.error(f"Errore lettura chart {path}: {e}")
+        if media:
+            try:
+                await update.message.reply_media_group(media=media)
+            except Exception as e:
+                logger.error(f"Errore invio media group: {e}")
+                await update.message.reply_text(analysis_text)
+        else:
+            await update.message.reply_text(analysis_text)
+        ml_analyst.cleanup_charts(chart_paths)
+    else:
+        await update.message.reply_text(analysis_text)
+
 async def post_shutdown(application: Application):
     await monitor.close_session()
 
@@ -3218,6 +3295,7 @@ def main():
     app.add_handler(CommandHandler("cancelcond",   cancelcond_command))
     app.add_handler(CommandHandler("chart", chart_command))
     app.add_handler(CommandHandler("scan",         scan_command))
+    app.add_handler(CommandHandler("analyze",      analyze_command))
     app.add_handler(CommandHandler("scanstop",     scanstop_command))
     app.add_handler(CommandHandler("scanstatus",   scanstatus_command))
 
