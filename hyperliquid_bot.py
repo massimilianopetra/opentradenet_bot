@@ -601,11 +601,19 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Non autorizzato.")
         return
     monitored = monitor.get_all_monitored_symbols()
-    
-    # Usa parse_mode=None per evitare problemi con path che contengono caratteri speciali Markdown
+    _utenti_noti = (
+        set(monitor.subscribers.keys()) |
+        monitor.tracking_enabled |
+        monitor.spike_subscribers |
+        set(monitor.conditional_orders.keys())
+    )
     msg = (
         "📊 Statistiche Bot\n\n"
-        f"👥 Utenti attivi: {len(monitor.subscribers)}\n"
+        f"👥 Utenti noti: {len(_utenti_noti)}\n"
+        f"   📋 Subscribe: {len(monitor.subscribers)}\n"
+        f"   🎯 Tracking:  {len(monitor.tracking_enabled)}\n"
+        f"   ⚡ Spike:     {len(monitor.spike_subscribers)}\n"
+        f"   📌 Cond.ord.: {len(monitor.conditional_orders)}\n"
         f"📈 Simboli monitorati: {len(monitored)} — {', '.join(sorted(monitored)) if monitored else 'nessuno'}\n"
         f"💾 Prezzi in cache: {len(monitor.last_prices)}\n"
         f"⏱️ Intervallo polling: {POLL_INTERVAL}s\n"
