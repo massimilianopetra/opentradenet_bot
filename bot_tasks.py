@@ -651,6 +651,28 @@ async def position_tracking_task(application) -> None:
                             f"TRACK NEW {coin} "
                             f"({'L' if p['is_long'] else 'S'}) -> chat {chat_id}"
                         )
+
+                        # --- Journal log_open ---
+                        # Solo se non esiste già un record open per questo simbolo
+                        # (evita duplicati con trade aperti via /long /short o importati da CSV)
+                        try:
+                            open_trades  = ml_journal.get_open_trades(chat_id=chat_id)
+                            already_open = any(
+                                t['symbol'] == coin.upper()
+                                for t in open_trades
+                            )
+                            if not already_open:
+                                ml_journal.log_open(
+                                    symbol=coin,
+                                    direction="long" if p['is_long'] else "short",
+                                    entry_price=p['entry_px'],
+                                    size_usd=abs(p['size'] * p['entry_px']),
+                                    candles_dir=CANDLES_DIR,
+                                    chat_id=chat_id,
+                                )
+                        except Exception as _je:
+                            logger.warning(f"ml_journal log_open (track) error {coin}: {_je}")
+
                         try:
                             label = 'Posizione attiva al boot' if is_first_cycle else 'Nuova posizione rilevata'
                             await application.bot.send_message(
