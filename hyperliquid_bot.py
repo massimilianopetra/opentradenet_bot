@@ -127,6 +127,9 @@ ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY', '')
 # Whitelist chat_id autorizzati a usare /analyze (solo uso personale)
 ANALYZE_ALLOWED_CHATS = {int(x.strip()) for x in os.getenv('ANALYZE_ALLOWED_CHATS', '').split(',') if x.strip()}
 
+# Admin chat_id — accesso a /stats e comandi di sistema
+ADMIN_CHAT_ID = int(os.getenv('ADMIN_CHAT_ID', '0')) or None
+
 # Chiave di cifratura per le private key su disco (Fernet AES-128)
 # Se non presente nel .env viene generata automaticamente al primo avvio e stampata in log
 WALLET_ENCRYPTION_KEY = os.getenv('WALLET_ENCRYPTION_KEY', '')
@@ -925,7 +928,12 @@ async def symbols_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode='Markdown')
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if not _is_admin(chat_id):
+        await update.message.reply_text("❌ Non autorizzato.")
+        return
     monitored = monitor.get_all_monitored_symbols()
+    
     # Usa parse_mode=None per evitare problemi con path che contengono caratteri speciali Markdown
     msg = (
         "📊 Statistiche Bot\n\n"
@@ -2454,9 +2462,11 @@ async def setleverage(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------------------------------------------------------------------
 
 def _is_wallet_allowed(chat_id: int) -> bool:
-    """True se il chat_id è autorizzato a usare i comandi wallet."""
-    return not WALLET_ALLOWED_CHATS or chat_id in WALLET_ALLOWED_CHATS
+    return _is_admin(chat_id) or not WALLET_ALLOWED_CHATS or chat_id in WALLET_ALLOWED_CHATS
 
+def _is_admin(chat_id: int) -> bool:
+    """True se il chat_id è l'amministratore del bot."""
+    return ADMIN_CHAT_ID is not None and chat_id == ADMIN_CHAT_ID
 
 async def setaddress(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
