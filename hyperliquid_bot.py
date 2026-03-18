@@ -20,6 +20,7 @@ import candle_chart as cc
 from bot_monitor import HyperliquidPriceMonitor, MonitorConfig
 import importlib, ml_scanner as _mls
 import ml_analyst
+import ml_journal
 from bot_tasks import init_tasks, TaskContext, price_polling_task, position_tracking_task, candle_task
 
 # ---------------------------------------------------------------------------
@@ -85,54 +86,32 @@ POLL_INTERVAL          = int(os.getenv('POLL_INTERVAL', '10'))
 PRICE_CHANGE_THRESHOLD = float(os.getenv('PRICE_CHANGE_THRESHOLD', '0.5'))
 MAX_SYMBOLS_DISPLAY    = int(os.getenv('MAX_SYMBOLS_DISPLAY', '20'))
 
-# DEX aggiuntivi: lista separata da virgola nel .env
-# Es: SUPPORTED_DEXS=xyz        oppure SUPPORTED_DEXS=xyz,flx,vntl
-# "" = perp standard (sempre incluso), "xyz" = perp XYZ ecc.
 SUPPORTED_DEXS = [d.strip() for d in os.getenv('SUPPORTED_DEXS', 'xyz').split(',') if d.strip()]
 
-# Simboli fissi per pricespike: lista separata da virgola nel .env
-# Es: SPIKE_EXTRA_SYMBOLS=BTC,SOL,ETH,XRP,SUI,HYPER
-# I simboli xyz vengono aggiunti automaticamente a runtime dal batch
 SPIKE_EXTRA_SYMBOLS    = [s.strip().upper() for s in os.getenv('SPIKE_EXTRA_SYMBOLS', 'BTC,SOL,ETH,XRP,SUI,HYPE').split(',') if s.strip()]
-SPIKE_THRESHOLD        = float(os.getenv('SPIKE_THRESHOLD', '1.0'))   # soglia % poll-to-poll per pricespike
-# Simboli xyz da escludere dagli alert spike (bassi volumi) — solo gli avvisi, lo storico viene comunque salvato
-# Es: SPIKE_EXCLUDE_SYMBOLS=SYMB1,SYMB2
+SPIKE_THRESHOLD        = float(os.getenv('SPIKE_THRESHOLD', '1.0'))
 SPIKE_EXCLUDE_SYMBOLS  = {s.strip().upper() for s in os.getenv('SPIKE_EXCLUDE_SYMBOLS', '').split(',') if s.strip()}
 
-# Directory storico prezzi giornalieri (un CSV per simbolo)
-# Record_TIME: ora dopo cui scrivere la quotazione del giorno (default 09:00)
 PRICES_DIR    = Path(os.getenv('PRICES_DIR', 'data/prices'))
 COND_DIR      = Path(os.getenv('COND_DIR',   'data/conditional_orders'))
 CANDLES_DIR   = Path(os.getenv('CANDLES_DIR', 'data/candles'))
-CANDLES_INTERVAL_SECS = int(os.getenv('CANDLES_INTERVAL_SECS', '900'))  # 900s = 15 minuti
-PRICES_TIME   = int(os.getenv('PRICES_TIME', '9'))  # ora intera (0-23)
+CANDLES_INTERVAL_SECS = int(os.getenv('CANDLES_INTERVAL_SECS', '900'))
+PRICES_TIME   = int(os.getenv('PRICES_TIME', '9'))
 
-# Intervallo aggiornamento position tracking (default 5 minuti)
 POSITION_TRACK_INTERVAL = int(os.getenv('POSITION_TRACK_INTERVAL', '300'))
 
-# Silenziamento ordini condizionali dopo "Salta" (default 5 minuti)
 CONDITIONAL_SNOOZE_SECS   = int(os.getenv('CONDITIONAL_SNOOZE_SECS',      '300'))
-# Intervallo re-notifica ordini condizionali (nuovo messaggio con bip, default 2 minuti)
 CONDITIONAL_RENOTIFY_SECS  = int(os.getenv('CONDITIONAL_RENOTIFY_SECS',  '120'))
-# Trailing stop per takeprofit: % ritracciamento dal picco → chiusura automatica
 CONDITIONAL_TP_TRAILING_PCT = float(os.getenv('CONDITIONAL_TP_TRAILING_PCT', '0.5'))
 
-# Whitelist chat_id autorizzati a usare comandi wallet/trading (separati da virgola)
-# Es: WALLET_ALLOWED_CHATS=123456789,987654321
-# Se vuoto: tutti gli utenti possono registrare le loro credenziali
 WALLET_ALLOWED_CHATS = {int(x.strip()) for x in os.getenv('WALLET_ALLOWED_CHATS', '').split(',') if x.strip()}
 
-# API key Anthropic per /analyze (Claude Vision)
 ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY', '')
 
-# Whitelist chat_id autorizzati a usare /analyze (solo uso personale)
 ANALYZE_ALLOWED_CHATS = {int(x.strip()) for x in os.getenv('ANALYZE_ALLOWED_CHATS', '').split(',') if x.strip()}
 
-# Admin chat_id — accesso a /stats e comandi di sistema
 ADMIN_CHAT_ID = int(os.getenv('ADMIN_CHAT_ID', '0')) or None
 
-# Chiave di cifratura per le private key su disco (Fernet AES-128)
-# Se non presente nel .env viene generata automaticamente al primo avvio e stampata in log
 WALLET_ENCRYPTION_KEY = os.getenv('WALLET_ENCRYPTION_KEY', '')
 
 
@@ -143,7 +122,6 @@ if not TELEGRAM_TOKEN:
 logger.info(f"Config: POLL={POLL_INTERVAL}s THRESHOLD={PRICE_CHANGE_THRESHOLD}% DEX={SUPPORTED_DEXS}")
 logger.info(f"Log file: {LOG_FILE.resolve()}")
 
-# Inizializza WalletStore — genera chiave di cifratura se non presente nel .env
 if not WALLET_ENCRYPTION_KEY:
     _new_key = generate_encryption_key()
     logger.warning("=" * 60)
@@ -253,7 +231,6 @@ async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     price_val, mtype, dex = result
     emoji, label = market_label(mtype, dex)
 
-    # Delta rispetto al prezzo del primo subscribe (se sottoscritto)
     sub_msg = ""
     base = monitor.subscribe_base_prices.get(sym)
     if base:
@@ -261,7 +238,6 @@ async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         arrow_s = "📈" if pct_s > 0 else "📉" if pct_s < 0 else "➡️"
         sub_msg = f"\n{arrow_s} Da subscribe ({base:,.6f}): {pct_s:+.2f}%"
 
-    # Delta rispetto al prezzo del giorno prima (dal CSV storico)
     yesterday_msg = ""
     yesterday = get_yesterday_price(sym)
     if yesterday:
@@ -300,10 +276,8 @@ async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     emoji, label = market_label(mtype, dex)
 
     monitor.add_subscriber(chat_id, sym)
-    # Salva il prezzo base al momento del subscribe come riferimento per gli alert
     monitor.last_prices[sym]       = price_val
     monitor.alert_base_prices[sym] = price_val
-    # Salva il prezzo originale del subscribe (non viene mai aggiornato)
     monitor.subscribe_base_prices.setdefault(sym, price_val)
 
     await update.message.reply_text(
@@ -333,11 +307,6 @@ async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Non monitoro più *{sym}*", parse_mode='Markdown')
 
 async def pricespike(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /pricespike        — attiva/disattiva il monitoraggio spike
-    /pricespike status — mostra stato e soglia
-    /pricespike N      — imposta soglia personalizzata (es: /pricespike 2.0)
-    """
     chat_id = update.effective_chat.id
     arg = context.args[0].lower() if context.args else ''
 
@@ -355,7 +324,6 @@ async def pricespike(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if arg and arg not in ('on', 'off'):
-        # Prova a interpretarlo come soglia numerica
         try:
             value = float(arg.replace(',', '.'))
             if value <= 0 or value > 100:
@@ -375,7 +343,6 @@ async def pricespike(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-    # On / off / toggle
     if arg == 'off':
         monitor.spike_subscribers.discard(chat_id)
         logger.info(f"Chat {chat_id} disattivato pricespike")
@@ -395,7 +362,6 @@ async def pricespike(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown'
         )
     else:
-        # già attivo e nessun argomento: informa l'utente
         thresh = monitor.get_spike_threshold(chat_id)
         await update.message.reply_text(
             f"⚡ *PriceSpike già attivo* (soglia ±{thresh}%)\n"
@@ -457,12 +423,10 @@ async def list_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
 
-    # Fetch prezzi correnti in batch
     all_prices = await monitor.fetch_all_prices()
     threshold  = monitor.get_threshold(chat_id)
     msg        = ""
 
-    # --- Sezione position tracking ---
     if tracks:
         msg += f"📊 *Position Tracking* (soglia: ±{threshold}%):\n\n"
         for coin, track in sorted(tracks.items()):
@@ -472,7 +436,6 @@ async def list_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE)
             base          = track['alert_base']
             is_long       = track['is_long']
             liq           = track['liq_px']
-            # PnL real-time e % su margine iniziale calcolato da entry
             cp          = current_price or entry
             pnl_rt      = (cp - entry) * track['size']
             pnl_s       = "+" if pnl_rt >= 0 else ""
@@ -480,12 +443,10 @@ async def list_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE)
             except: _lev = 1
             _margin_i   = abs(entry * track['size'] / _lev) if _lev else track['margin'] or 1
             pnl_pct     = pnl_rt / _margin_i * 100 if _margin_i else 0
-            fmt           = lambda x: f"{x:,.5g}"
 
             arrow_dir = "📈" if is_long else "📉"
             dir_s     = "LONG" if is_long else "SHORT"
 
-            # Formatter prezzi: decimali adattivi (2 per grandi, 4 per piccoli)
             def fmt(x):
                 if x == 0: return "0"
                 if x >= 1000: return f"{x:,.2f}"
@@ -509,7 +470,6 @@ async def list_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 f"  Liq: {fmt(liq)} (dist: {liq_dist:.1f}%)\n\n"
             )
 
-    # --- Sezione subscribe manuali ---
     if subs:
         msg += f"📋 *Subscribe manuali* (soglia: ±{threshold}%):\n\n"
         for sym in sorted(subs):
@@ -533,10 +493,6 @@ async def list_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text(msg.strip(), parse_mode='Markdown')
 
 async def symbols_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /symbols          — lista tutti i simboli
-    /symbols QUERY    — cerca simboli che contengono QUERY (es. /symbols sil)
-    """
     query    = context.args[0].upper() if context.args else ''
     await update.message.reply_text("🔍 Recupero simboli...")
     all_syms  = await monitor.get_all_symbols()
@@ -545,7 +501,6 @@ async def symbols_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     spots     = all_syms.get('spot', [])
     dex_perps = all_syms.get('dex_perps', {})
 
-    # Se c'è una query, filtra e mostra solo i match
     if query:
         matches = []
         for s in perps:
@@ -566,7 +521,6 @@ async def symbols_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg, parse_mode='Markdown')
         return
 
-    # Lista completa con troncamento
     msg = "📊 *Simboli disponibili*\n\n"
 
     if perps:
@@ -639,22 +593,6 @@ DEFAULT_BARS_PER_TF = {
 
 
 async def chart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /chart SIMBOLO [BARRE] [TIMEFRAME]
-
-    Genera e invia un grafico candlestick del simbolo richiesto.
-    Il timeframe può essere 15m (default), 1H o 1D; viene aggregato
-    automaticamente dalle candele 15m archiviate.
-
-    Esempi:
-        /chart GOLD            — 15m, 120 candele (~30h)
-        /chart GOLD 200        — 15m, 200 candele
-        /chart GOLD 1H         — 1H, 120 candele (~5 giorni)
-        /chart GOLD 72 1H      — 1H, 72 candele (3 giorni)
-        /chart GOLD 1D         — 1D, 120 candele (~4 mesi)
-        /chart GOLD 60 1D      — 1D, 60 giorni (~2 mesi)
-    """
-    # ── Validazione argomenti ────────────────────────────────────────────
     if not context.args:
         await update.message.reply_text(
             "📊 *Chart candlestick multi-timeframe*\n\n"
@@ -675,8 +613,6 @@ async def chart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     timeframe = '15m'
     bars      = None
 
-    # Parsing flessibile: gli argomenti dopo il simbolo possono essere
-    # in qualsiasi ordine tra numero-barre e timeframe
     for arg in context.args[1:]:
         if arg.upper() in VALID_TIMEFRAMES:
             timeframe = arg.upper()
@@ -691,11 +627,9 @@ async def chart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
-    # Applica default barre per il timeframe scelto
     if bars is None:
         bars = DEFAULT_BARS_PER_TF[timeframe]
 
-    # Limiti
     max_bars = {'15m': 500, '1H': 500, '1D': 365}
     if bars < 10 or bars > max_bars[timeframe]:
         await update.message.reply_text(
@@ -703,7 +637,6 @@ async def chart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ── Controlla che il CSV esista ──────────────────────────────────────
     try:
         csv_path = cc.find_csv(symbol, Path(CANDLES_DIR))
     except FileNotFoundError:
@@ -714,7 +647,6 @@ async def chart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ── Messaggio di attesa ──────────────────────────────────────────────
     tf_desc = {'15m': '15 minuti', '1H': 'orario', '1D': 'giornaliero'}
     wait_msg = await update.message.reply_text(
         f"⏳ Generazione grafico *{symbol}* ({tf_desc[timeframe]}, {bars} barre)...",
@@ -723,7 +655,6 @@ async def chart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     tmp_path = None
     try:
-        # ── Carica dati (con aggregazione) e genera grafico ──────────────
         data = cc.load_csv(csv_path, bars, timeframe)
         n    = len(data['closes'])
 
@@ -737,7 +668,6 @@ async def chart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         fig = cc.plot_chart(data, symbol, timeframe)
 
-        # ── Salva in file temporaneo e invia ─────────────────────────────
         with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
             tmp_path = tmp.name
 
@@ -778,14 +708,12 @@ async def chart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------------------------------------------------------------------
 
 def get_yesterday_price(sym: str) -> Optional[float]:
-    """Legge il prezzo del giorno precedente dal CSV dello storico."""
     csv_path = PRICES_DIR / f"{sym}.csv"
     if not csv_path.exists():
         return None
     try:
         with open(csv_path, 'r', encoding='utf-8') as f:
             rows = [r for r in csv.reader(f) if r and r[0] != 'date']
-        # Cerca il giorno precedente: l'ultima riga con data < oggi
         today = date.today().isoformat()
         past = [r for r in rows if r[0] < today]
         if past:
@@ -795,30 +723,22 @@ def get_yesterday_price(sym: str) -> Optional[float]:
     return None
 
 def save_daily_snapshot(prices: Dict[str, Tuple[float, str, Optional[str]]]) -> int:
-    """
-    Scrive la quotazione odierna di ogni simbolo nel proprio CSV.
-    Formato: data/prices/BTC.csv  con colonne date,price,type,dex
-    Salta il simbolo se la data di oggi è già presente nel file.
-    Ritorna il numero di simboli scritti.
-    """
     PRICES_DIR.mkdir(parents=True, exist_ok=True)
-    today     = date.today().isoformat()   # es: 2026-01-15
+    today     = date.today().isoformat()
     written   = 0
 
     for sym, (price, mtype, dex) in prices.items():
         csv_path = PRICES_DIR / f"{sym}.csv"
 
-        # Controlla se oggi è già stato scritto
         if csv_path.exists():
             try:
                 with open(csv_path, 'r', encoding='utf-8') as f:
                     last_line = f.readlines()[-1].strip()
                 if last_line.startswith(today):
-                    continue   # già registrato oggi
+                    continue
             except Exception:
-                pass  # file vuoto o corrotto: riscrivi comunque
+                pass
 
-        # Scrivi (o crea) il CSV
         is_new = not csv_path.exists()
         try:
             with open(csv_path, 'a', newline='', encoding='utf-8') as f:
@@ -838,18 +758,12 @@ def save_daily_snapshot(prices: Dict[str, Tuple[float, str, Optional[str]]]) -> 
 # ---------------------------------------------------------------------------
 
 async def fetch_candles_15m(symbol: str, dex: str = '') -> list:
-    """
-    Fetcha le ultime N candele a 15 minuti per un simbolo da Hyperliquid.
-    Ritorna lista di dict: {timestamp, open, high, low, close, volume}
-    """
     import aiohttp
-    # Hyperliquid vuole il nome interno: 'xyz:GOLD' per i dex, 'GOLD' per perp standard
     internal_name = f"{dex}:{symbol}" if dex else symbol
 
-    # Calcola window: ultime 2 candele (coprono l'intervallo corrente + precedente)
     import time
     now_ms   = int(time.time() * 1000)
-    start_ms = now_ms - 90 * 60 * 1000  # 90 minuti fa = 6 candele da 15m
+    start_ms = now_ms - 90 * 60 * 1000
 
     payload = {
         "type":       "candleSnapshot",
@@ -891,11 +805,6 @@ async def fetch_candles_15m(symbol: str, dex: str = '') -> list:
 
 
 def save_candles(symbol: str, candles: list) -> int:
-    """
-    Salva le candele in data/candles/SIMBOLO/SIMBOLO_15m.csv
-    Deduplicazione + merge ordinato cronologicamente (no append cieco).
-    Ritorna il numero di righe nuove scritte.
-    """
     if not candles:
         return 0
 
@@ -903,14 +812,13 @@ def save_candles(symbol: str, candles: list) -> int:
     sym_dir.mkdir(parents=True, exist_ok=True)
     csv_path = sym_dir / f"{symbol}_15m.csv"
 
-    # Legge righe esistenti
     existing_rows = []
     existing_ts   = set()
     if csv_path.exists():
         try:
             with open(csv_path, 'r', encoding='utf-8') as f:
                 reader = csv.reader(f)
-                next(reader, None)  # salta header
+                next(reader, None)
                 for row in reader:
                     if row:
                         existing_rows.append(row)
@@ -918,7 +826,6 @@ def save_candles(symbol: str, candles: list) -> int:
         except Exception:
             pass
 
-    # Aggiunge solo le candele con timestamp nuovo
     written   = 0
     new_rows  = []
     for c in candles:
@@ -933,7 +840,6 @@ def save_candles(symbol: str, candles: list) -> int:
     if not written:
         return 0
 
-    # Merge + ordinamento cronologico + riscrittura completa
     all_rows = existing_rows + new_rows
     all_rows.sort(key=lambda r: r[0])
     try:
@@ -1069,11 +975,6 @@ async def scanstatus_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # ---------------------------------------------------------------------------
 
 async def trackpositions(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /trackpositions        — mostra stato
-    /trackpositions on     — attiva (default)
-    /trackpositions off    — disattiva
-    """
     chat_id = update.effective_chat.id
     arg     = context.args[0].lower() if context.args else ''
 
@@ -1104,7 +1005,6 @@ async def trackpositions(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # status
     active = chat_id in monitor.tracking_enabled
     tracks = monitor.position_tracks.get(chat_id, {})
     await update.message.reply_text(
@@ -1126,11 +1026,8 @@ def _next_cond_id() -> str:
 
 def _cond_label(order: dict) -> str:
     is_sl   = order['type'] == 'stoploss'
-    is_long = order.get('is_long', True)  # default long per ordini vecchi senza campo
+    is_long = order.get('is_long', True)
     t       = "🛑 SL" if is_sl else "🎯 TP"
-    # Freccia corretta per direzione + tipo:
-    # LONG:  SL ≤ trigger, TP ≥ trigger
-    # SHORT: SL ≥ trigger, TP ≤ trigger
     if is_sl:
         arrow = "≤" if is_long else "≥"
     else:
@@ -1149,13 +1046,6 @@ def _cond_label(order: dict) -> str:
 
 
 async def stoploss_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /stoploss SIMBOLO PREZZO
-    Inserisce uno Stop Loss NATIVO su Hyperliquid.
-    L'ordine rimane attivo sull'exchange anche se il bot è offline.
-    Es: /stoploss GOLD 5100
-        /stoploss BTC 80000
-    """
     chat_id = update.effective_chat.id
     if not _is_wallet_allowed(chat_id):
         await update.message.reply_text("❌ Non autorizzato.")
@@ -1190,7 +1080,6 @@ async def stoploss_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Prezzo non valido.")
         return
 
-    # Validazione: verifica posizione aperta e direzione
     track = monitor.position_tracks.get(chat_id, {}).get(symbol)
     price_result = await monitor.get_price(symbol)
     current_px   = price_result[0] if price_result else (track['entry_px'] if track else None)
@@ -1231,7 +1120,6 @@ async def stoploss_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         direction = "LONG" if result.get('_is_long') else "SHORT"
         oid       = result.get('_oid')
 
-        # Salva oid in memoria per poterlo cancellare con /cancelsl
         if oid is not None:
             monitor.native_sl_orders.setdefault(chat_id, {})[symbol] = {
                 'oid':        oid,
@@ -1239,7 +1127,7 @@ async def stoploss_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'trigger_px': trigger_px,
                 'is_long':    result.get('_is_long', True),
             }
-            monitor.save_native_sl_orders(chat_id)   # <-- riga aggiunta
+            monitor.save_native_sl_orders(chat_id)
             oid_note = f"\noid: `{oid}` (usa /cancelsl {symbol} per rimuovere)"
         else:
             oid_note = "\n⚠️ oid non ricevuto — per cancellare usa la UI Hyperliquid"
@@ -1260,19 +1148,12 @@ async def stoploss_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Errore: {e}")
 
 async def cancelsl_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /cancelsl SIMBOLO
-    Cancella lo Stop Loss nativo precedentemente inserito su Hyperliquid.
-    Es: /cancelsl GOLD
-        /cancelsl BTC
-    """
     chat_id = update.effective_chat.id
     if not _is_wallet_allowed(chat_id):
         await update.message.reply_text("❌ Non autorizzato.")
         return
 
     if not context.args:
-        # Lista SL attivi se nessun simbolo fornito
         sl_map = monitor.native_sl_orders.get(chat_id, {})
         if not sl_map:
             await update.message.reply_text(
@@ -1332,9 +1213,8 @@ async def cancelsl_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"❌ Errore exchange: {result.get('response', result)}")
             return
 
-        # Rimuove dalla mappa locale
         sl_map.pop(symbol, None)
-        monitor.save_native_sl_orders(chat_id)   # <-- aggiungi questa riga
+        monitor.save_native_sl_orders(chat_id)
 
         await update.message.reply_text(
             f"✅ *Stop Loss cancellato*\n\n"
@@ -1349,12 +1229,6 @@ async def cancelsl_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Errore: {e}")
 
 async def takeprofit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /takeprofit SIMBOLO PREZZO [importo|%]
-    Es: /takeprofit GOLD 5600
-        /takeprofit NFLX 155 50%
-    Triggera quando prezzo >= PREZZO.
-    """
     await _set_conditional(update, context, 'takeprofit')
 
 
@@ -1398,7 +1272,6 @@ async def _set_conditional(update: Update, context: ContextTypes.DEFAULT_TYPE, c
             try:    usd_amount = float(arg.replace(',', '.'))
             except: await update.message.reply_text("❌ Importo non valido."); return
 
-    # Verifica posizione aperta
     track = monitor.position_tracks.get(chat_id, {}).get(symbol)
     if not track:
         await update.message.reply_text(
@@ -1412,9 +1285,6 @@ async def _set_conditional(update: Update, context: ContextTypes.DEFAULT_TYPE, c
     price_result = await monitor.get_price(symbol)
     current_px   = price_result[0] if price_result else monitor.last_prices.get(symbol, track['entry_px'])
 
-    # Validazione direzione trigger
-
-    # Validazione direzione trigger
     if ctype == 'stoploss':
         if is_long and trigger_px >= current_px:
             await update.message.reply_text(
@@ -1426,7 +1296,7 @@ async def _set_conditional(update: Update, context: ContextTypes.DEFAULT_TYPE, c
                 f"❌ Stop Loss SHORT deve essere *sopra* il prezzo attuale\n"
                 f"Attuale: ${_fmt(current_px)} — inserisci un valore superiore",
                 parse_mode='Markdown'); return
-    else:  # takeprofit
+    else:
         if is_long and trigger_px <= current_px:
             await update.message.reply_text(
                 f"❌ Take Profit LONG deve essere *sopra* il prezzo attuale\n"
@@ -1440,7 +1310,6 @@ async def _set_conditional(update: Update, context: ContextTypes.DEFAULT_TYPE, c
 
     dex = await _detect_dex(symbol)
 
-    # Un solo ordine per tipo per simbolo — sostituisce il precedente
     conds   = monitor.conditional_orders.setdefault(chat_id, {})
     old_oid = next((o for o, v in conds.items()
                     if v['coin'] == symbol and v['type'] == ctype), None)
@@ -1455,7 +1324,7 @@ async def _set_conditional(update: Update, context: ContextTypes.DEFAULT_TYPE, c
         'trigger_px':       trigger_px,
         'usd':              usd_amount,
         'pct':              pct,
-        'is_long':          is_long,   # direzione posizione al momento della creazione
+        'is_long':          is_long,
         'created_at':       datetime.now(),
         'snoozed_until':    None,
         'alert_message_id': None,
@@ -1473,10 +1342,9 @@ async def _set_conditional(update: Update, context: ContextTypes.DEFAULT_TYPE, c
     dir_s    = "LONG" if is_long else "SHORT"
     upd_note = f" _(sostituisce {old_oid})_" if old_oid else ""
 
-    # Freccia e operatore corretti per direzione + tipo ordine
     if ctype == 'stoploss':
         sym_arrow = "🔽 ≤" if is_long else "🔼 ≥"
-    else:  # takeprofit
+    else:
         sym_arrow = "🔼 ≥" if is_long else "🔽 ≤"
 
     await update.message.reply_text(
@@ -1491,7 +1359,6 @@ async def _set_conditional(update: Update, context: ContextTypes.DEFAULT_TYPE, c
 
 
 async def orders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Lista tutti gli ordini condizionali attivi."""
     chat_id = update.effective_chat.id
     conds   = monitor.conditional_orders.get(chat_id, {})
     if not conds:
@@ -1511,10 +1378,6 @@ async def orders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cancelcond_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /cancelcond ID   — cancella ordine condizionale
-    /cancelcond all  — cancella tutti
-    """
     chat_id = update.effective_chat.id
     conds   = monitor.conditional_orders.get(chat_id, {})
 
@@ -1546,7 +1409,6 @@ async def cancelcond_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # ---------------------------------------------------------------------------
 
 async def _detect_dex(symbol: str) -> str:
-    """Ritorna 'xyz' se il simbolo è sul dex xyz, '' altrimenti."""
     import aiohttp as _aiohttp
     try:
         async with _aiohttp.ClientSession() as sess:
@@ -1574,7 +1436,6 @@ def _fmt(x):
 # ---------------------------------------------------------------------------
 
 async def _order_precheck(update, chat_id):
-    """Controlli comuni: autorizzazione, address, key."""
     if not _is_wallet_allowed(chat_id):
         await update.message.reply_text("❌ Non autorizzato.")
         return False
@@ -1588,10 +1449,6 @@ async def _order_precheck(update, chat_id):
 
 
 async def long_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /long SIMBOLO IMPORTO_USD
-    Es: /long GOLD 500   → apre long GOLD per $500
-    """
     chat_id = update.effective_chat.id
     if not await _order_precheck(update, chat_id): return
 
@@ -1615,10 +1472,6 @@ async def long_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def short_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /short SIMBOLO IMPORTO_USD
-    Es: /short NFLX 300  → apre short NFLX per $300
-    """
     chat_id = update.effective_chat.id
     if not await _order_precheck(update, chat_id): return
 
@@ -1642,7 +1495,6 @@ async def short_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _prepare_order(update, chat_id, symbol, usd, is_buy):
-    """Mostra riepilogo e chiede conferma."""
     await update.message.reply_text("⏳ Recupero prezzo...")
 
     addr = wallet_store.get_address(chat_id)
@@ -1663,14 +1515,13 @@ async def _prepare_order(update, chat_id, symbol, usd, is_buy):
     direction    = "📈 LONG" if is_buy else "📉 SHORT"
     expires_at   = datetime.now().timestamp() + 30
 
-    # Salva ordine pendente
     monitor.pending_orders[chat_id] = {
-        'symbol':   symbol,
-        'dex':      dex,
-        'is_buy':   is_buy,
-        'usd':      usd,
-        'price':    price,
-        'size':     size,
+        'symbol':     symbol,
+        'dex':        dex,
+        'is_buy':     is_buy,
+        'usd':        usd,
+        'price':      price,
+        'size':       size,
         'expires_at': expires_at,
     }
 
@@ -1691,11 +1542,6 @@ async def _prepare_order(update, chat_id, symbol, usd, is_buy):
 
 
 async def close_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /close SIMBOLO          → chiude tutta la posizione
-    /close SIMBOLO 50%      → chiude il 50%
-    /close SIMBOLO 200      → chiude $200 di posizione
-    """
     chat_id = update.effective_chat.id
     if not await _order_precheck(update, chat_id): return
 
@@ -1731,11 +1577,9 @@ async def close_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     key  = wallet_store.get_key(chat_id)
     dex  = await _detect_dex(symbol)
 
-    # Trova posizione aperta
     tracks = monitor.position_tracks.get(chat_id, {})
     pos    = tracks.get(symbol)
     if not pos:
-        # Prova a leggere live
         try:
             client   = HyperliquidClient(addr, private_key=key)
             pos_list = await asyncio.get_event_loop().run_in_executor(
@@ -1764,7 +1608,7 @@ async def close_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     monitor.pending_orders[chat_id] = {
         'symbol':     symbol,
         'dex':        dex,
-        'is_buy':     None,  # None = close
+        'is_buy':     None,
         'usd':        usd_amount,
         'pct':        pct,
         'expires_at': expires_at,
@@ -1809,7 +1653,6 @@ async def confirm_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         if order['is_buy'] is None:
-            # CLOSE
             result = await asyncio.get_event_loop().run_in_executor(
                 None, lambda: client.market_close(
                     symbol, dex,
@@ -1819,7 +1662,6 @@ async def confirm_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             direction = "🔴 CLOSE"
         else:
-            # LONG / SHORT
             result = await asyncio.get_event_loop().run_in_executor(
                 None, lambda: client.market_open(
                     symbol, order['is_buy'], order['usd'], dex
@@ -1829,19 +1671,42 @@ async def confirm_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         logger.info(f"ORDER {direction} {symbol} chat {chat_id}: {result}")
 
-        # Controlla errore
         if isinstance(result, dict) and result.get('status') == 'err':
             await update.message.reply_text(f"❌ Errore exchange: {result.get('response', result)}")
             return
+
+        # --- Journal log_open ---
+        try:
+            fill_price = result.get('_price') or order.get('price')
+            fill_usd   = result.get('_usd')   or order.get('usd', 0.0)
+            if order['is_buy'] is not None and fill_price:
+                _ml_score, _ml_signal = None, None
+                try:
+                    _scores = _mls.get_latest_scores()
+                    if symbol in _scores:
+                        _ml_score  = _scores[symbol].get('score')
+                        _ml_signal = _scores[symbol].get('signal')
+                except Exception:
+                    pass
+                ml_journal.log_open(
+                    symbol=symbol,
+                    direction="long" if order['is_buy'] else "short",
+                    entry_price=fill_price,
+                    size_usd=fill_usd,
+                    ml_score=_ml_score,
+                    ml_signal=_ml_signal,
+                    candles_dir=CANDLES_DIR,
+                    chat_id=chat_id,
+                )
+        except Exception as _je:
+            logger.warning(f"ml_journal log_open error: {_je}")
 
         market_s = f"_{dex.upper()}_" if dex else "PERP"
         size     = result.get('_size', '?')
         price    = result.get('_price')
         usd      = result.get('_usd') or order.get('usd')
 
-        # Riga prezzo — solo se disponibile (non per close)
         price_line = f"Prezzo: ${_fmt(price)}\n" if isinstance(price, float) else ""
-        # Riga importo — solo se disponibile
         usd_line   = f"Importo: ${usd:,.2f}\n" if isinstance(usd, (int, float)) else ""
 
         await update.message.reply_text(
@@ -1860,7 +1725,6 @@ async def confirm_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cancelorder_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Annulla l'ordine pendente."""
     chat_id = update.effective_chat.id
     if monitor.pending_orders.pop(chat_id, None):
         await update.message.reply_text("🚫 Ordine annullato.")
@@ -1872,12 +1736,10 @@ async def order_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Gestisce i bottoni inline Conferma / Annulla degli ordini."""
     query   = update.callback_query
     chat_id = query.message.chat_id
-    await query.answer()  # rimuove il "loading" sul bottone
+    await query.answer()
 
     if query.data == "order_confirm":
-        # Rimuove i bottoni dal messaggio originale
         await query.edit_message_reply_markup(reply_markup=None)
-        # Esegue come se l'utente avesse scritto /confirm
         order = monitor.pending_orders.get(chat_id)
         if not order:
             await query.message.reply_text("⏰ Ordine scaduto o già eseguito.")
@@ -1915,6 +1777,32 @@ async def order_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.message.reply_text(f"❌ Errore exchange: {result.get('response', result)}")
                 return
 
+            # --- Journal log_open ---
+            try:
+                fill_price = result.get('_price') or order.get('price')
+                fill_usd   = result.get('_usd')   or order.get('usd', 0.0)
+                if order['is_buy'] is not None and fill_price:
+                    _ml_score, _ml_signal = None, None
+                    try:
+                        _scores = _mls.get_latest_scores()
+                        if symbol in _scores:
+                            _ml_score  = _scores[symbol].get('score')
+                            _ml_signal = _scores[symbol].get('signal')
+                    except Exception:
+                        pass
+                    ml_journal.log_open(
+                        symbol=symbol,
+                        direction="long" if order['is_buy'] else "short",
+                        entry_price=fill_price,
+                        size_usd=fill_usd,
+                        ml_score=_ml_score,
+                        ml_signal=_ml_signal,
+                        candles_dir=CANDLES_DIR,
+                        chat_id=chat_id,
+                    )
+            except Exception as _je:
+                logger.warning(f"ml_journal log_open error: {_je}")
+
             market_s   = f"_{dex.upper()}_" if dex else "PERP"
             size       = result.get('_size', '?')
             price      = result.get('_price')
@@ -1944,10 +1832,10 @@ async def cond_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Gestisce i bottoni Esegui / Salta / Cancella degli ordini condizionali."""
     query = update.callback_query
     await query.answer()
-    data  = query.data  # cond_exec_CHATID_OID | cond_snooze_... | cond_cancel_...
+    data  = query.data
 
     parts  = data.split('_')
-    action = parts[1]           # exec | snooze | cancel
+    action = parts[1]
     cid    = int(parts[2])
     oid    = parts[3]
 
@@ -1968,12 +1856,9 @@ async def cond_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown'
         )
 
-
-
     elif action == 'snooze':
-        order['snoozed_until'] = datetime.now().timestamp() + CONDITIONAL_SNOOZE_SECS
         order['snoozed_until']    = datetime.now().timestamp() + CONDITIONAL_SNOOZE_SECS
-        order['alert_message_id'] = None  # alla ripresa manda nuovo bip
+        order['alert_message_id'] = None
         monitor.save_conditional_orders(cid)
         mins = CONDITIONAL_SNOOZE_SECS // 60
         await query.edit_message_text(
@@ -2006,7 +1891,6 @@ async def cond_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.message.reply_text(f"❌ Errore exchange: {result.get('response', result)}")
                 return
 
-            # Rimuove l'ordine dopo esecuzione
             conds.pop(oid, None)
             monitor.save_conditional_orders(cid)
 
@@ -2031,15 +1915,6 @@ async def cond_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------------------------------------------------------------------
 
 async def setleverage(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /setleverage SYMBOL LEVERAGE [cross]
-    Es: /setleverage NFLX 5
-        /setleverage BTC 10
-        /setleverage MSTR 3 cross
-
-    Funziona su perp standard e xyz. Default: isolated.
-    Richiede /setaddress e /setkey.
-    """
     chat_id = update.effective_chat.id
     if not _is_wallet_allowed(chat_id):
         await update.message.reply_text("❌ Non autorizzato.")
@@ -2077,15 +1952,11 @@ async def setleverage(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Leva non valida (1-100).")
         return
 
-    # Parsing argomenti extra: [xyz] [cross] in qualsiasi ordine
     extra_args = [a.lower() for a in context.args[2:]]
     is_cross   = 'cross' in extra_args
     force_xyz  = 'xyz' in extra_args
     margin_s   = "cross" if is_cross else "isolated"
 
-    # Determina se è un simbolo xyz:
-    # 1. Se l'utente ha passato 'xyz' esplicitamente → forza xyz
-    # 2. Altrimenti interroga il meta API del dex xyz
     import aiohttp as _aiohttp
     dex      = 'xyz' if force_xyz else ''
     market_s = 'XYZ' if force_xyz else 'PERP'
@@ -2116,7 +1987,6 @@ async def setleverage(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         logger.info(f"setleverage {symbol} {leverage}x {margin_s} ({market_s}) -> {result}")
 
-        # Controlla se l'SDK ha restituito un errore
         if isinstance(result, dict) and result.get('status') == 'err':
             await update.message.reply_text(f"❌ Errore: {result.get('response', result)}")
         else:
@@ -2140,14 +2010,9 @@ def _is_wallet_allowed(chat_id: int) -> bool:
     return _is_admin(chat_id) or not WALLET_ALLOWED_CHATS or chat_id in WALLET_ALLOWED_CHATS
 
 def _is_admin(chat_id: int) -> bool:
-    """True se il chat_id è l'amministratore del bot."""
     return ADMIN_CHAT_ID is not None and chat_id == ADMIN_CHAT_ID
 
 async def setaddress(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /setaddress 0x...  — salva il tuo account address Hyperliquid (pubblico).
-    Necessario per /positions e futuri comandi di trading.
-    """
     chat_id = update.effective_chat.id
     if not _is_wallet_allowed(chat_id):
         await update.message.reply_text("❌ Non autorizzato.")
@@ -2176,9 +2041,7 @@ async def setaddress(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     wallet_store.save_address(chat_id, address)
     short = f"{address[:6]}...{address[-4:]}"
-    # Tracking on per default
     monitor.tracking_enabled.add(chat_id)
-    # Cancella il messaggio con l'address per sicurezza
     try:
         await update.message.delete()
     except Exception:
@@ -2193,11 +2056,6 @@ async def setaddress(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def setkey(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /setkey 0x...  — salva la private key API (cifrata su disco).
-    Necessaria per i futuri comandi di trading (close, stop loss, ecc.).
-    IMPORTANTE: invia il comando in chat privata col bot, non in gruppi.
-    """
     chat_id = update.effective_chat.id
     if not _is_wallet_allowed(chat_id):
         await update.message.reply_text("❌ Non autorizzato.")
@@ -2217,7 +2075,6 @@ async def setkey(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Chiave non valida.")
         return
 
-    # Cancella subito il messaggio con la chiave
     try:
         await update.message.delete()
     except Exception:
@@ -2232,9 +2089,6 @@ async def setkey(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def walletinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /walletinfo  — mostra stato credenziali + saldo wallet.
-    """
     chat_id = update.effective_chat.id
     if not _is_wallet_allowed(chat_id):
         await update.message.reply_text("❌ Non autorizzato.")
@@ -2244,14 +2098,12 @@ async def walletinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     has_key = wallet_store.has_key(chat_id)
     addr_str = f"`{addr[:6]}...{addr[-4:]}`" if addr else "❌ non impostato"
 
-    # Sezione credenziali
     msg = (
         f"🔐 *Wallet Info*\n\n"
         f"📍 Address: {addr_str}\n"
         f"🔑 Chiave API: {'✅ impostata' if has_key else '❌ non impostata'}\n"
     )
 
-    # Saldo — richiede solo address
     if addr:
         await update.message.reply_text("⏳ Recupero saldo...")
         try:
@@ -2262,22 +2114,20 @@ async def walletinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             equity    = summary['account_value']
             margin    = summary['total_margin']
             available = max(equity - margin, 0)
-            ntl_perp  = summary['total_ntl_pos']  # solo perp standard dall'API
+            ntl_perp  = summary['total_ntl_pos']
 
-            # Esposizione XYZ dalle posizioni tracciate in memoria
             ntl_xyz = 0.0
             tracks  = monitor.position_tracks.get(chat_id, {})
             all_px  = await monitor.fetch_all_prices() if tracks else {}
             for coin, track in tracks.items():
                 if not track.get('dex'):
-                    continue  # skip perp standard, già in ntl_perp
+                    continue
                 price_info = all_px.get(coin)
                 if price_info:
                     ntl_xyz += abs(track['size'] * price_info[0])
 
             ntl_tot = ntl_perp + ntl_xyz
 
-            # Ordini condizionali attivi
             n_conds = len(monitor.conditional_orders.get(chat_id, {}))
 
             ntl_line = f"  Esposizione tot:  ${ntl_tot:,.2f}"
@@ -2307,10 +2157,6 @@ async def walletinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /positions  — mostra le posizioni aperte su Hyperliquid.
-    Richiede solo l'address pubblico (/setaddress).
-    """
     chat_id = update.effective_chat.id
     if not _is_wallet_allowed(chat_id):
         await update.message.reply_text("❌ Non autorizzato.")
@@ -2372,7 +2218,6 @@ async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode='Markdown')
 
 
-
 # ---------------------------------------------------------------------------
 # Lifecycle
 # ---------------------------------------------------------------------------
@@ -2380,7 +2225,6 @@ async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def post_init(application: Application):
     logger.info(f"Bot avviato. POLL={POLL_INTERVAL}s THRESHOLD={PRICE_CHANGE_THRESHOLD}%")
 
-    # Riattiva tracking per tutti gli utenti che hanno già un address su disco
     wallet_dir = DATA_DIR / 'wallet'
     if wallet_dir.exists():
         for user_dir in wallet_dir.iterdir():
@@ -2392,13 +2236,11 @@ async def post_init(application: Application):
                 except ValueError:
                     pass
 
-    # Carica ordini condizionali persistiti su disco
     monitor.load_all_conditional_orders()
     total_conds = sum(len(v) for v in monitor.conditional_orders.values())
     if total_conds:
         logger.info(f"Ordini condizionali caricati: {total_conds}")
 
-    # Inizializza il TaskContext e lancia i background task
     ctx = TaskContext(
         monitor=monitor,
         wallet_store=wallet_store,

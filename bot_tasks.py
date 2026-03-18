@@ -17,6 +17,7 @@ from datetime import datetime
 from typing import Dict, Set, Optional, Tuple
 
 from hl_wallet import HyperliquidClient
+import ml_journal
 
 logger = logging.getLogger(__name__)
 
@@ -75,10 +76,10 @@ async def price_polling_task(application) -> None:
     CONDITIONAL_SNOOZE_SECS   = c['CONDITIONAL_SNOOZE_SECS']
     CONDITIONAL_TP_TRAILING_PCT = c['CONDITIONAL_TP_TRAILING_PCT']
 
-    market_label       = h['market_label']
+    market_label        = h['market_label']
     save_daily_snapshot = h['save_daily_snapshot']
-    _fmt               = h['_fmt']
-    wallet_store       = _ctx.wallet_store
+    _fmt                = h['_fmt']
+    wallet_store        = _ctx.wallet_store
 
     logger.info("🚀 Task di polling avviato (modalità batch)")
 
@@ -236,7 +237,6 @@ async def price_polling_task(application) -> None:
                             is_tp = o['type'] == 'takeprofit'
                             is_sl = o['type'] == 'stoploss'
 
-                            # Direzione: 1) posizione tracciata, 2) campo is_long, 3) skip
                             _track = monitor.position_tracks.get(cid, {}).get(coin)
                             if _track:
                                 is_long = _track['is_long']
@@ -251,7 +251,6 @@ async def price_polling_task(application) -> None:
                                 )
                                 continue
 
-                            # Verifica trigger
                             if is_long:
                                 triggered = (
                                     (is_sl and current_px <= o['trigger_px']) or
@@ -334,13 +333,11 @@ async def price_polling_task(application) -> None:
                                         logger.error(
                                             f"Errore trailing close {coin} chat {cid}: {e}"
                                         )
-                                    continue  # ordine già rimosso, passa al prossimo
+                                    continue
 
                                 else:
-                                    # Picco aggiornato ma trailing non ancora scattato
                                     triggered = False
 
-                            # Skip se in snooze
                             if o.get('snoozed_until') and now_ts < o['snoozed_until']:
                                 continue
 
@@ -476,7 +473,6 @@ async def price_polling_task(application) -> None:
                                         f"({spike_pct:+.2f}%){yest_s}"
                                     )
 
-                    # Aggiorna prezzi precedenti per tutti i simboli spike
                     for sym in spike_symbols_all:
                         if sym in all_prices:
                             monitor.spike_prev_prices[sym] = all_prices[sym][0]
@@ -538,6 +534,7 @@ async def position_tracking_task(application) -> None:
       - Fetcha le posizioni aperte per ogni utente con tracking attivo
       - Notifica nuove posizioni, aggiornamenti (size/entry), chiusure
       - Cancella automaticamente gli ordini condizionali delle posizioni chiuse
+      - Registra aperture/chiusure nel ml_journal
     """
     c            = _ctx.c
     h            = _ctx.h
@@ -546,6 +543,7 @@ async def position_tracking_task(application) -> None:
 
     POSITION_TRACK_INTERVAL = c['POSITION_TRACK_INTERVAL']
     SUPPORTED_DEXS          = c['SUPPORTED_DEXS']
+    CANDLES_DIR             = c['CANDLES_DIR']
     _fmt                    = h['_fmt']
 
     logger.info(f"🎯 Task position tracking avviato (ogni {POSITION_TRACK_INTERVAL}s)")
@@ -685,6 +683,24 @@ async def position_tracking_task(application) -> None:
                             f"Rimossi {len(removed_oids)} ordini condizionali "
                             f"per {coin} chiuso"
                         )
+
+                    # Prezzo corrente per log_close
+                    current_price = monitor.last_prices.get(coin, track['entry_px'])
+
+                    # Stima P&L dalla posizione tracciata (unrealized al momento della chiusura)
+                    # Usiamo unrealized dell'ultimo aggiornamento come approssimazione
+                    pnl_estimate = track.get('unrealized', 0.0) or 0.0
+
+                    # --- Journal log_close ---
+                    try:
+                        ml_journal.log_close(
+                            symbol=coin,
+                            exit_price=current_price,
+                            pnl_usd=pnl_estimate,
+                            chat_id=chat_id,
+                        )
+                    except Exception as _je:
+                        logger.warning(f"ml_journal log_close error {coin}: {_je}")
 
                     try:
                         cond_note = (
