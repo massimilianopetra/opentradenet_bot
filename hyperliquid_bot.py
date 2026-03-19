@@ -1054,12 +1054,17 @@ async def stoploss_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 2:
         await update.message.reply_text(
             "🛑 *Stop Loss Nativo*\n\n"
-            "Uso: /stoploss SIMBOLO PREZZO\n\n"
+            "Uso: /stoploss SIMBOLO VALORE\n\n"
+            "Il VALORE può essere:\n"
+            "  `4600`   → prezzo esplicito\n"
+            "  `2%`     → distanza % dall'entry\n"
+            "  `50$`    → perdita massima in dollari\n\n"
             "L'ordine viene inserito direttamente su Hyperliquid.\n"
             "Rimane attivo anche se il bot è offline.\n\n"
             "Esempi:\n"
-            "  /stoploss GOLD 5100\n"
-            "  /stoploss BTC 80000",
+            "  /stoploss GOLD 4600\n"
+            "  /stoploss GOLD 2%\n"
+            "  /stoploss GOLD 50$",
             parse_mode='Markdown'
         )
         return
@@ -1074,42 +1079,103 @@ async def stoploss_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     symbol = context.args[0].upper()
-    try:
-        trigger_px = float(context.args[1].replace(',', '.'))
-    except ValueError:
-        await update.message.reply_text("❌ Prezzo non valido.")
-        return
+    raw    = context.args[1].replace(',', '.')
 
-    track = monitor.position_tracks.get(chat_id, {}).get(symbol)
+    # Recupera prezzo corrente e posizione (necessari per calcoli % e $)
+    track        = monitor.position_tracks.get(chat_id, {}).get(symbol)
     price_result = await monitor.get_price(symbol)
     current_px   = price_result[0] if price_result else (track['entry_px'] if track else None)
+    is_long      = track['is_long'] if track else True
+    entry_px     = track['entry_px'] if track else current_px
 
+    # ── Parsing del valore ──────────────────────────────────────────────────
+    trigger_px  = None
+    mode_label  = ""
+
+    if raw.endswith('%'):
+        # Distanza percentuale dall'entry
+        if entry_px is None:
+            await update.message.reply_text(
+                "❌ Nessuna posizione trovata per calcolare la % — usa un prezzo esplicito.")
+            return
+        try:
+            pct = float(raw[:-1])
+            if pct <= 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("❌ Percentuale non valida.")
+            return
+        if is_long:
+            trigger_px = entry_px * (1 - pct / 100)
+        else:
+            trigger_px = entry_px * (1 + pct / 100)
+        mode_label = f"entry {_fmt(entry_px)} -{pct}%"
+
+    elif raw.endswith('$'):
+        # Perdita massima in dollari
+        if entry_px is None or not track:
+            await update.message.reply_text(
+                "❌ Nessuna posizione trovata per calcolare il $ — usa un prezzo esplicito.")
+            return
+        try:
+            loss_usd = float(raw[:-1])
+            if loss_usd <= 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("❌ Importo $ non valido.")
+            return
+        size = abs(track['size'])
+        if size == 0:
+            await update.message.reply_text("❌ Size posizione zero, impossibile calcolare.")
+            return
+        delta_px = loss_usd / size
+        if is_long:
+            trigger_px = entry_px - delta_px
+        else:
+            trigger_px = entry_px + delta_px
+        mode_label = f"entry {_fmt(entry_px)} -${loss_usd}"
+
+    else:
+        # Prezzo esplicito
+        try:
+            trigger_px = float(raw)
+        except ValueError:
+            await update.message.reply_text(
+                "❌ Valore non valido. Usa un prezzo (es. `4600`), una % (es. `2%`) "
+                "o un importo $ (es. `50$`).",
+                parse_mode='Markdown')
+            return
+        mode_label = f"prezzo esplicito"
+
+    # ── Validazione direzione ───────────────────────────────────────────────
     if current_px:
-        is_long = track['is_long'] if track else True
         if is_long and trigger_px >= current_px:
             await update.message.reply_text(
                 f"❌ Stop Loss LONG deve essere *sotto* il prezzo attuale\n"
-                f"Attuale: ${_fmt(current_px)} — inserisci un valore inferiore",
+                f"Calcolato: ${_fmt(trigger_px)}  Attuale: ${_fmt(current_px)}",
                 parse_mode='Markdown')
             return
         if not is_long and trigger_px <= current_px:
             await update.message.reply_text(
                 f"❌ Stop Loss SHORT deve essere *sopra* il prezzo attuale\n"
-                f"Attuale: ${_fmt(current_px)} — inserisci un valore superiore",
+                f"Calcolato: ${_fmt(trigger_px)}  Attuale: ${_fmt(current_px)}",
                 parse_mode='Markdown')
             return
 
-    dex = await _detect_dex(symbol)
+    dex      = await _detect_dex(symbol)
     market_s = f"_{dex.upper()}_" if dex else "PERP"
 
-    await update.message.reply_text(f"⏳ Inserimento Stop Loss nativo su Hyperliquid...")
+    await update.message.reply_text(
+        f"⏳ Inserimento Stop Loss nativo su Hyperliquid...\n"
+        f"Trigger calcolato: ${_fmt(trigger_px)} ({mode_label})"
+    )
 
     try:
         client = HyperliquidClient(addr, private_key=key)
         result = await asyncio.get_event_loop().run_in_executor(
             None, lambda: client.set_stop_loss_native(symbol, trigger_px, dex)
         )
-        logger.info(f"SL NATIVE {symbol} trigger=${trigger_px} chat {chat_id}: {result}")
+        logger.info(f"SL NATIVE {symbol} trigger=${trigger_px} ({mode_label}) chat {chat_id}: {result}")
 
         if isinstance(result, dict) and result.get('status') == 'err':
             await update.message.reply_text(
@@ -1135,7 +1201,7 @@ async def stoploss_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"✅ *Stop Loss nativo inserito*\n\n"
             f"🛑 SL *{symbol}* {market_s} ({direction})\n"
-            f"Trigger: ${_fmt(trigger_px)}\n"
+            f"Trigger: ${_fmt(trigger_px)}  _({mode_label})_\n"
             f"Size: {size}\n"
             f"⚙️ Gestito da Hyperliquid — attivo anche offline"
             f"{oid_note}\n"
