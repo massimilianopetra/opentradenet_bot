@@ -336,7 +336,7 @@ async def price_polling_task(application) -> None:
                                     continue
 
                                 else:
-                                    triggered = False
+                                    pass
 
                             if o.get('snoozed_until') and now_ts < o['snoozed_until']:
                                 continue
