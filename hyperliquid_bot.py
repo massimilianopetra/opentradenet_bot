@@ -2413,6 +2413,59 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(analysis_text)
 
+async def message_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Solo admin: /message all TESTO  oppure  /message <chat_id> TESTO"""
+    chat_id = update.effective_chat.id
+    if not _is_admin(chat_id):
+        await update.message.reply_text("❌ Comando riservato all'admin.")
+        return
+
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "ℹ️ Sintassi:\n"
+            "  /message all <testo>          → broadcast a tutti gli utenti noti\n"
+            "  /message <chat_id> <testo>    → messaggio a una chat specifica"
+        )
+        return
+
+    target = context.args[0]
+    text   = " ".join(context.args[1:])
+
+    known_users: set[int] = (
+        monitor.spike_subscribers |
+        monitor.tracking_enabled |
+        set(monitor.conditional_orders.keys())
+    )
+
+    if target.lower() == "all":
+        if not known_users:
+            await update.message.reply_text("⚠️ Nessun utente noto a cui inviare il messaggio.")
+            return
+        ok, fail = 0, 0
+        for uid in known_users:
+            try:
+                await context.bot.send_message(chat_id=uid, text=text)
+                ok += 1
+            except Exception as e:
+                logger.warning(f"message_command: impossibile inviare a {uid}: {e}")
+                fail += 1
+        await update.message.reply_text(
+            f"✅ Broadcast completato: {ok} inviati, {fail} falliti."
+        )
+    else:
+        try:
+            target_id = int(target)
+        except ValueError:
+            await update.message.reply_text("❌ chat_id non valido. Usa un numero o 'all'.")
+            return
+        try:
+            await context.bot.send_message(chat_id=target_id, text=text)
+            await update.message.reply_text(f"✅ Messaggio inviato a {target_id}.")
+        except Exception as e:
+            logger.warning(f"message_command: impossibile inviare a {target_id}: {e}")
+            await update.message.reply_text(f"❌ Errore invio a {target_id}: {e}")
+
+
 async def post_shutdown(application: Application):
     await monitor.close_session()
 
@@ -2457,6 +2510,7 @@ def main():
     app.add_handler(CommandHandler("scanstop",     scanstop_command))
     app.add_handler(CommandHandler("scanstatus",   scanstatus_command))
     app.add_handler(CommandHandler("cancelsl", cancelsl_command))
+    app.add_handler(CommandHandler("message",  message_command))
 
     app.post_init     = post_init
     app.post_shutdown = post_shutdown
