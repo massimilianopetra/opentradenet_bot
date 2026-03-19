@@ -561,6 +561,9 @@ async def position_tracking_task(application) -> None:
                         None,
                         lambda: client.get_positions(extra_dexs=SUPPORTED_DEXS)
                     )
+                    logger.info(f"DIAG TRACK FETCH chat={chat_id} addr={addr[:10]}... found={len(pos_list)} dexs={SUPPORTED_DEXS}")
+                    for p in pos_list:
+                        logger.info(f"  DIAG TRACK POS: coin={p['coin']} {'L' if p['is_long'] else 'S'} size={p['size']} dex={p.get('dex','PERP')} entry={p['entry_px']}")
                 except Exception as e:
                     logger.error(f"Position tracking fetch error chat {chat_id}: {e}")
                     continue

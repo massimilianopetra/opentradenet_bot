@@ -2182,6 +2182,7 @@ async def walletinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             equity    = summary['account_value']
             margin    = summary['total_margin']
+            logger.info(f"DIAG /walletinfo chat={chat_id} addr={addr[:10]}... equity={equity:.2f} margin={margin:.2f}")
             available = max(equity - margin, 0)
             ntl_perp  = summary['total_ntl_pos']
 
@@ -2246,9 +2247,13 @@ async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pos_list = await asyncio.get_event_loop().run_in_executor(
             None, lambda: client.get_positions(extra_dexs=SUPPORTED_DEXS)
         )
+        logger.info(f"DIAG /positions chat={chat_id} addr={addr[:10]}... found={len(pos_list)} supported_dexs={SUPPORTED_DEXS}")
+        for p in pos_list:
+            logger.info(f"  DIAG POS: coin={p['coin']} {'L' if p['is_long'] else 'S'} size={p['size']} dex={p.get('dex','PERP')} entry={p['entry_px']}")
         summary = await asyncio.get_event_loop().run_in_executor(
             None, client.get_account_summary
         )
+        logger.info(f"  DIAG SUMMARY: equity={summary.get('account_value',0):.2f} margin={summary.get('total_margin',0):.2f}")
     except Exception as e:
         logger.error(f"Errore get_positions chat {chat_id}: {e}")
         await update.message.reply_text(f"❌ Errore API: {e}")
