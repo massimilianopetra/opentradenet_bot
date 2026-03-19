@@ -368,10 +368,15 @@ class HyperliquidClient:
         # per chiudere uno short si compra (is_buy=True)
         is_buy     = not is_long
 
-        # Arrotonda trigger_px al numero di decimali ammessi dall'exchange
-        px_dec     = self._get_px_decimals(coin, dex)
-        trigger_px = round(trigger_px, px_dec)
-        logger.debug(f"SL native {coin} trigger_px arrotondato a {px_dec} decimali: {trigger_px}")
+        # Arrotonda trigger_px al tick size corretto per l'exchange
+        # Su xyz la precisione dipende dal prezzo: >= 1000 → 1 dec, >= 10 → 2 dec, altrimenti 3
+        if trigger_px >= 1000:
+            trigger_px = round(trigger_px, 1)
+        elif trigger_px >= 10:
+            trigger_px = round(trigger_px, 2)
+        else:
+            trigger_px = round(trigger_px, 3)
+        logger.info(f"SL native {coin} trigger_px arrotondato: {trigger_px}")
 
         if dex:
             exchange = self._get_exchange_xyz(dex)
@@ -461,25 +466,6 @@ class HyperliquidClient:
         except Exception:
             pass
         return 4  # default safe
-
-    def _get_px_decimals(self, coin: str, dex: str = '') -> int:
-        """
-        Numero di decimali per il prezzo del simbolo (usato per arrotondare trigger_px).
-        Legge 'maxDecimals' dalla meta API — se assente usa 2 come default safe.
-        """
-        try:
-            import requests
-            resp     = requests.post(f'{self.API_URL}/info',
-                                     json={'type': 'meta', 'dex': dex}, timeout=10)
-            universe = resp.json().get('universe', [])
-            prefix   = f"{dex}:" if dex else ""
-            for asset in universe:
-                name = asset.get('name', '').replace(prefix, '').replace('XYZ:', '')
-                if name.upper() == coin.upper():
-                    return asset.get('maxDecimals', 2)
-        except Exception:
-            pass
-        return 2  # default safe
 
     def get_account_summary(self) -> dict:
         """
