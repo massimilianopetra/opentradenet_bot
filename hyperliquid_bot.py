@@ -1968,6 +1968,15 @@ async def confirm_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown'
         )
 
+        if order['is_buy'] is None:
+            conds = monitor.conditional_orders.get(chat_id, {})
+            removed = [oid for oid, o in conds.items() if o['coin'] == symbol]
+            for oid in removed:
+                conds.pop(oid, None)
+            if removed:
+                monitor.save_conditional_orders(chat_id)
+                logger.info(f"Rimossi {len(removed)} ordini condizionali per {symbol} dopo close chat {chat_id}")
+
     except Exception as e:
         logger.error(f"Errore esecuzione ordine {symbol} chat {chat_id}: {e}")
         await update.message.reply_text(f"❌ Errore: {e}")
@@ -2106,6 +2115,15 @@ async def order_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"⏰ {datetime.now().strftime('%H:%M:%S')}",
                 parse_mode='Markdown'
             )
+
+            if order['is_buy'] is None:
+                conds = monitor.conditional_orders.get(chat_id, {})
+                removed = [oid for oid, o in conds.items() if o['coin'] == symbol]
+                for oid in removed:
+                    conds.pop(oid, None)
+                if removed:
+                    monitor.save_conditional_orders(chat_id)
+                    logger.info(f"Rimossi {len(removed)} ordini condizionali per {symbol} dopo close chat {chat_id}")
         except Exception as e:
             logger.error(f"Errore esecuzione ordine (btn) {symbol} chat {chat_id}: {e}")
             await query.message.reply_text(f"❌ Errore: {e}")
