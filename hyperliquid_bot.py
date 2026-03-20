@@ -200,8 +200,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/cancelcond ID|all         — cancella ordine take profit\n"
         "/chart SYM [N] [TF]       — grafico candele (es: /chart GOLD 72 1H)\n"
         "/analyze SYM              — analisi tecnica AI daily+15m con setup suggerito\n"
-        "/scan [SYM] [SCORE]       — scan VSA opportunità\n"
-        "/scan daemon [SCORE]      — attiva scan automatico\n"
+        "/scan                     — scanner (tutte le modalità)\n"
+        "/scan volume [N]          — top N spike di volume 15m\n"
+        "/scan daemon [SCORE]      — scan VSA automatico\n"
+        "/scan [SYM] [SCORE]       — scan VSA manuale\n"
         "/scanstop                 — ferma scan automatico\n"
         "/scanstatus               — stato scanner\n"
         "/stats — statistiche bot\n"
@@ -906,6 +908,17 @@ def save_candles(symbol: str, candles: list) -> int:
 
     return written
 
+_SCAN_HELP = (
+    "📡 *Scanner* — modalità disponibili:\n\n"
+    "`/scan volume [N]`     — top N spike di volume su 15m (def. 10)\n"
+    "`/scan daemon [SCORE]` — scan VSA automatico ogni candela 15m\n"
+    "`/scan momentum`       — _coming soon_\n"
+    "`/scan oi`             — _coming soon_\n"
+    "`/scan [SYM] [SCORE]`  — scan VSA manuale (tutti o un simbolo)\n"
+    "\nEs: `/scan volume 5`  `/scan BTC`  `/scan 70`"
+)
+
+
 async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if not _is_wallet_allowed(chat_id):
@@ -913,21 +926,60 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     args = context.args or []
-    daemon_mode = False
-    symbol      = None
-    min_score   = monitor.scanner_min_score
 
-    for arg in args:
-        if arg.lower() == 'daemon':
-            daemon_mode = True
-        elif arg.isdigit():
-            min_score = int(arg)
-        else:
-            symbol = arg.upper()
+    # ── nessun argomento → help ──────────────────────────────────────────────
+    if not args:
+        await update.message.reply_text(_SCAN_HELP, parse_mode='Markdown')
+        return
 
-    recipients = list(monitor.spike_subscribers | monitor.tracking_enabled) or [chat_id]
+    mode = args[0].lower()
 
-    if daemon_mode:
+    # ── volume ───────────────────────────────────────────────────────────────
+    if mode == 'volume':
+        top_n = 10
+        if len(args) > 1 and args[1].isdigit():
+            top_n = max(1, int(args[1]))
+
+        await update.message.reply_text(f"🔍 Analisi volume su {len(_mls.discover_symbols())} simboli...")
+        results = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: _mls.scan_volume(top_n)
+        )
+        if not results:
+            await update.message.reply_text("📭 Nessun dato disponibile.")
+            return
+
+        lines = [f"📊 *Top {top_n} Volume Spike* — 15m\n"]
+        for r in results:
+            ratio = r['ratio']
+            if ratio > 3:
+                em = "🔴"
+            elif ratio > 1.5:
+                em = "🟡"
+            else:
+                em = "⚪"
+            vol_fmt = f"{r['last_volume']:,.0f}" if r['last_volume'] >= 1 else f"{r['last_volume']:.4f}"
+            lines.append(f"{em} *{r['symbol']}*  x{ratio:.2f}  vol={vol_fmt}")
+
+        await update.message.reply_text("\n".join(lines), parse_mode='Markdown')
+        return
+
+    # ── stub: momentum ───────────────────────────────────────────────────────
+    if mode == 'momentum':
+        await update.message.reply_text("🚧 Modalità *momentum* — coming soon.", parse_mode='Markdown')
+        return
+
+    # ── stub: oi ─────────────────────────────────────────────────────────────
+    if mode == 'oi':
+        await update.message.reply_text("🚧 Modalità *oi* (open interest) — coming soon.", parse_mode='Markdown')
+        return
+
+    # ── daemon ───────────────────────────────────────────────────────────────
+    if mode == 'daemon':
+        min_score  = monitor.scanner_min_score
+        recipients = list(monitor.spike_subscribers | monitor.tracking_enabled) or [chat_id]
+        for arg in args[1:]:
+            if arg.isdigit():
+                min_score = int(arg)
         monitor.scanner_enabled   = True
         monitor.scanner_min_score = min_score
         monitor.scanner_chat_ids  = set(recipients)
@@ -941,13 +993,22 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # ── VSA scan manuale ─────────────────────────────────────────────────────
+    symbol    = None
+    min_score = monitor.scanner_min_score
+    for arg in args:
+        if arg.isdigit():
+            min_score = int(arg)
+        elif arg.lower() not in ('vsa',):
+            symbol = arg.upper()
+
     symbols = [symbol] if symbol else _mls.discover_symbols()
     if not symbols:
         await update.message.reply_text("❌ Nessun simbolo trovato.")
         return
 
     sym_str = symbol if symbol else f"tutti i simboli ({len(symbols)})"
-    await update.message.reply_text(f"🔍 Scan in corso su {sym_str}...")
+    await update.message.reply_text(f"🔍 Scan VSA in corso su {sym_str}...")
 
     live_prices, funding_map = await asyncio.gather(
         _mls.fetch_live_prices(),
@@ -958,8 +1019,8 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data = _mls.load_last_candles(sym, _mls.LOOKBACK)
         if data is None:
             continue
-        lp   = live_prices.get(sym)
-        fr   = funding_map.get(sym.upper())
+        lp     = live_prices.get(sym)
+        fr     = funding_map.get(sym.upper())
         result = _mls.compute_opportunity(data, live_price=lp, funding_rate=fr)
         if result and result['score'] >= min_score:
             opportunities.append(result)

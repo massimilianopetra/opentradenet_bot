@@ -186,6 +186,36 @@ def discover_symbols():
     return sorted(symbols)
 
 
+def scan_volume(top_n: int = 10) -> list:
+    """
+    Calcola per ogni simbolo il ratio ultimo_volume / media_20_candele_precedenti.
+    Ritorna lista di dict ordinata per ratio decrescente, troncata a top_n.
+
+    Dict keys: 'symbol', 'ratio', 'last_volume', 'avg_volume'
+    """
+    results = []
+    for sym in discover_symbols():
+        data = load_last_candles(sym, 21)
+        if data is None:
+            continue
+        vols = data['volumes']
+        if len(vols) < 2:
+            continue
+        last_vol = vols[-1]
+        prev     = vols[-21:-1]           # fino a 20 candele precedenti
+        avg_vol  = sum(prev) / len(prev) if prev else 0.0
+        if avg_vol == 0:
+            continue
+        results.append({
+            'symbol':      sym,
+            'ratio':       last_vol / avg_vol,
+            'last_volume': last_vol,
+            'avg_volume':  avg_vol,
+        })
+    results.sort(key=lambda r: r['ratio'], reverse=True)
+    return results[:top_n]
+
+
 # ---------------------------------------------------------------------------
 # 1b. PREZZI LIVE HYPERLIQUID
 # ---------------------------------------------------------------------------
