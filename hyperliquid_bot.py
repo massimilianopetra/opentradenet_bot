@@ -1912,6 +1912,45 @@ async def order_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.message.reply_text(f"❌ Errore exchange: {result.get('response', result)}")
                 return
 
+            # --- Fetch immediato posizioni per aggiornare position_tracks ---
+            try:
+                _pos_list = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: client.get_positions(extra_dexs=SUPPORTED_DEXS)
+                )
+                _current = monitor.position_tracks.get(chat_id, {})
+                _new_tracks = {}
+                for _p in _pos_list:
+                    _coin = _p['coin']
+                    if _coin in _current:
+                        _t = _current[_coin].copy()
+                        _t.update({
+                            'entry_px':   _p['entry_px'],
+                            'size':       _p['size'],
+                            'margin':     _p['margin'],
+                            'leverage':   _p['leverage'],
+                            'unrealized': _p['unrealized'],
+                            'liq_px':     _p['liq_px'],
+                            'is_long':    _p['is_long'],
+                        })
+                        _new_tracks[_coin] = _t
+                    else:
+                        _new_tracks[_coin] = {
+                            'entry_px':   _p['entry_px'],
+                            'is_long':    _p['is_long'],
+                            'size':       _p['size'],
+                            'margin':     _p['margin'],
+                            'leverage':   _p['leverage'],
+                            'dex':        _p.get('dex', 'PERP'),
+                            'unrealized': _p['unrealized'],
+                            'liq_px':     _p['liq_px'],
+                            'alert_base': monitor.last_prices.get(_p['coin'], _p['entry_px']),
+                            'added_at':   datetime.now(),
+                        }
+                monitor.position_tracks[chat_id] = _new_tracks
+                logger.info(f"ORDER (btn) position_tracks aggiornato immediatamente: {list(_new_tracks.keys())} chat {chat_id}")
+            except Exception as _pe:
+                logger.warning(f"ORDER (btn) fetch immediato posizioni fallito chat {chat_id}: {_pe}")
+
             # --- Journal log_open ---
             try:
                 fill_price = result.get('_price') or order.get('price')
