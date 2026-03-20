@@ -175,6 +175,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "💎 Spot tokens\n\n"
         "Comandi:\n"
         "/price SYMBOL — prezzo corrente\n"
+        "/spread SYMBOL — bid/ask/spread e liquidità\n"
         "/subscribe SYMBOL — inizia a monitorare\n"
         "/unsubscribe SYMBOL — smetti di monitorare\n"
         "/list — le tue sottoscrizioni\n"
@@ -253,6 +254,58 @@ async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⏰ {datetime.now().strftime('%H:%M:%S')}",
         parse_mode='Markdown'
     )
+
+async def spread_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text(
+            "Uso: /spread SIMBOLO  (es: /spread BTC, /spread GOLD)"
+        )
+        return
+
+    symbol = context.args[0].upper()
+    await update.message.reply_text(f"🔍 Recupero spread di {symbol}...")
+
+    try:
+        client = HyperliquidClient('0x0000000000000000000000000000000000000000')
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: client.get_spread(symbol)
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Errore API: {e}")
+        return
+
+    if not result.get('found'):
+        await update.message.reply_text(
+            f"❌ *{symbol}* non trovato su XYZ né su PERP standard.",
+            parse_mode='Markdown'
+        )
+        return
+
+    spread_pct = result['spread_pct']
+    dex_label  = result['dex']
+
+    if spread_pct < 0.05:
+        liq_emoji = "🟢"
+        liq_label = "Alta liquidità"
+    elif spread_pct < 0.15:
+        liq_emoji = "🟡"
+        liq_label = "Liquidità media"
+    else:
+        liq_emoji = "🔴"
+        liq_label = "Bassa liquidità"
+
+    await update.message.reply_text(
+        f"📊 *Spread {symbol}* — {dex_label}\n\n"
+        f"Bid: ${_fmt(result['bid'])}\n"
+        f"Ask: ${_fmt(result['ask'])}\n"
+        f"Mid: ${_fmt(result['mid'])}\n"
+        f"─────────────\n"
+        f"Spread: ${_fmt(result['spread_abs'])}  ({spread_pct:.4f}%)\n"
+        f"{liq_emoji} {liq_label}\n"
+        f"⏰ {datetime.now().strftime('%H:%M:%S')}",
+        parse_mode='Markdown'
+    )
+
 
 async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
@@ -2590,6 +2643,7 @@ def main():
     app.add_handler(CommandHandler("start",       start))
     app.add_handler(CommandHandler("help",        help_command))
     app.add_handler(CommandHandler("price",       price))
+    app.add_handler(CommandHandler("spread",      spread_command))
     app.add_handler(CommandHandler("subscribe",   subscribe))
     app.add_handler(CommandHandler("unsubscribe", unsubscribe))
     app.add_handler(CommandHandler("threshold",   threshold_command))

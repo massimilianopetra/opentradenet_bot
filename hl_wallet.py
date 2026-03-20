@@ -467,6 +467,58 @@ class HyperliquidClient:
             pass
         return 4  # default safe
 
+    def get_spread(self, coin: str) -> dict:
+        """
+        Recupera bid, ask, spread assoluto e percentuale per un simbolo.
+        Prova prima su dex xyz, poi su perp standard.
+        Usa metaAndAssetCtxs + campo impactPxs.
+
+        Restituisce dict con chiavi:
+          'found', 'dex', 'bid', 'ask', 'mid', 'spread_abs', 'spread_pct'
+        """
+        import requests
+        coin_up = coin.upper()
+
+        for dex in ('xyz', ''):
+            try:
+                payload = {'type': 'metaAndAssetCtxs'}
+                if dex:
+                    payload['dex'] = dex
+                resp = requests.post(f'{self.API_URL}/info', json=payload, timeout=10)
+                data = resp.json()
+                if not isinstance(data, list) or len(data) < 2:
+                    continue
+                universe   = data[0].get('universe', [])
+                asset_ctxs = data[1]
+                for idx, asset in enumerate(universe):
+                    raw_name   = asset.get('name', '')
+                    name_clean = raw_name.split(':')[-1] if ':' in raw_name else raw_name
+                    if name_clean.upper() != coin_up:
+                        continue
+                    if idx >= len(asset_ctxs):
+                        break
+                    impact = asset_ctxs[idx].get('impactPxs')
+                    if not impact or len(impact) < 2:
+                        break
+                    bid        = float(impact[0])
+                    ask        = float(impact[1])
+                    mid        = (bid + ask) / 2
+                    spread_abs = ask - bid
+                    spread_pct = (spread_abs / mid * 100) if mid else 0.0
+                    return {
+                        'found':      True,
+                        'dex':        dex or 'PERP',
+                        'bid':        bid,
+                        'ask':        ask,
+                        'mid':        mid,
+                        'spread_abs': spread_abs,
+                        'spread_pct': spread_pct,
+                    }
+            except Exception as e:
+                logger.warning(f"get_spread dex='{dex}' coin='{coin}': {e}")
+
+        return {'found': False}
+
     def get_account_summary(self) -> dict:
         """
         Restituisce il riepilogo del conto: equity, margin, ecc.
