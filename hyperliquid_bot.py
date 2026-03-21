@@ -961,13 +961,13 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 em = "⚪"
             dir_em  = "📈" if dirn == 'LONG' else "📉"
-            bar     = '▓' * (score // 20) + '░' * (5 - score // 20)
+            bar     = '🟩' * (score // 20) + '⬜' * (5 - score // 20)
             pnames  = ' · '.join(p['name'] for p in r['patterns'][:2])
             price   = r.get('price', 0)
             p_fmt   = f"${price:,.4f}" if price < 1 else f"${price:,.2f}"
             lines.append(
-                f"{em} *{r['symbol']}*  {dir_em} {dirn}  {bar}  *{score}/100*\n"
-                f"   {p_fmt}  _{pnames}_"
+                f"{em} *{r['symbol']}*  {dir_em} {dirn}  *{score}/100*\n"
+                f"   {bar}  {p_fmt}  _{pnames}_"
             )
 
         await update.message.reply_text("\n".join(lines), parse_mode='Markdown')
