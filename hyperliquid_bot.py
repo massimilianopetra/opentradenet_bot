@@ -1066,6 +1066,27 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _mls.fetch_live_prices(),
         _mls._fetch_all_funding_rates(),
     )
+
+    # Scan singolo simbolo: mostra sempre un'analisi anche sotto soglia
+    if symbol:
+        data = _mls.load_last_candles(symbol, _mls.LOOKBACK)
+        if data is None:
+            await update.message.reply_text(f"❌ Nessun dato candele per {symbol}.")
+            return
+        lp     = live_prices.get(symbol)
+        fr     = funding_map.get(symbol.upper())
+        result = _mls.compute_opportunity(data, live_price=lp, funding_rate=fr)
+        if result and result['score'] >= min_score:
+            msg = _mls.format_alert(result)
+        else:
+            msg = _mls.format_mini_analysis(data, live_price=lp, funding_rate=fr)
+        try:
+            await update.message.reply_text(msg, parse_mode='HTML')
+        except Exception as e:
+            logger.error(f"Errore invio scan singolo: {e}")
+        return
+
+    # Scan multi-simbolo: solo opportunità sopra soglia
     opportunities = []
     for sym in symbols:
         data = _mls.load_last_candles(sym, _mls.LOOKBACK)

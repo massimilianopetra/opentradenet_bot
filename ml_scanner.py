@@ -960,6 +960,89 @@ def compute_opportunity(data, live_price: float = None, funding_rate: float = No
 # 6. FORMATO ALERT
 # ---------------------------------------------------------------------------
 
+def format_mini_analysis(data, live_price: float = None, funding_rate: float = None) -> str:
+    """
+    Analisi compatta per un singolo simbolo, sempre disponibile anche quando
+    lo score è basso o non ci sono pattern VSA riconosciuti.
+    """
+    i      = len(data['closes']) - 1
+    sym    = data['symbol']
+    c      = live_price if live_price else data['closes'][i]
+
+    ctx      = get_context(data, i)
+    patterns = detect_vsa_patterns(data, i)
+    macro    = get_macro_context(data, i, 'LONG')   # solo per MACD/trend
+
+    # ── Prezzo ──
+    p_fmt = _fmt_price(c)
+
+    # ── BB zone ──
+    bb_map = {
+        'lower_band': '📍 Banda BB inferiore (ipervenduto)',
+        'lower_mid':  '📍 Metà inferiore BB',
+        'mid':        '📍 Centro BB (neutro)',
+        'upper_mid':  '📍 Metà superiore BB',
+        'upper_band': '📍 Banda BB superiore (ipercomprato)',
+    }
+    bb_str = bb_map.get(ctx['bb_zone'], '📍 BB: n/d')
+    if ctx.get('bb_squeeze'):
+        bb_str += ' — ⚡ Squeeze attivo'
+
+    # ── EMA trend ──
+    ema_map = {
+        'strong_up':   '📈 Trend forte rialzista (EMA9>21>50)',
+        'up':          '📈 Trend rialzista (EMA9>21)',
+        'flat':        '➡️  Trend piatto',
+        'down':        '📉 Trend ribassista (EMA9<21)',
+        'strong_down': '📉 Trend forte ribassista (EMA9<21<50)',
+    }
+    ema_str = ema_map.get(ctx['ema_trend'], '➡️  EMA: n/d')
+
+    # ── Volume ultima candela ──
+    vols     = data['volumes']
+    last_vol = vols[i]
+    prev20   = vols[max(0, i-20):i]
+    avg_vol  = sum(prev20) / len(prev20) if prev20 else last_vol
+    vol_ratio = last_vol / avg_vol if avg_vol > 0 else 1.0
+    vol_em    = '🔴' if vol_ratio > 3 else ('🟡' if vol_ratio > 1.5 else '⚪')
+    vol_str   = f"{vol_em} Volume x{vol_ratio:.1f} rispetto alla media 20 candele"
+
+    # ── Pattern VSA trovati (se ci sono, anche deboli) ──
+    pat_str = ''
+    if patterns:
+        long_w  = sum(p['strength'] for p in patterns if p['direction'] == 'LONG')
+        short_w = sum(p['strength'] for p in patterns if p['direction'] == 'SHORT')
+        direction = 'LONG' if long_w >= short_w else 'SHORT'
+        # calcola lo score anche se basso
+        opp = compute_opportunity(data, live_price=live_price, funding_rate=funding_rate)
+        score = opp['score'] if opp else 0
+        bar   = '🟩' * (score // 20) + '⬜' * (5 - score // 20)
+        dir_em = '📈' if direction == 'LONG' else '📉'
+        pat_lines = [f"  • {p['name']} ({p['direction']}, str={p['strength']})" for p in patterns]
+        pat_str = (
+            f"\n🧩 <b>Pattern VSA rilevati</b> — {dir_em} {direction}  {bar}  <b>{score}/100</b>\n"
+            + "\n".join(pat_lines)
+            + f"\n⚠️ Score sotto soglia — nessun alert automatico"
+        )
+    else:
+        pat_str = "\n🔇 <b>Nessun pattern VSA</b> sull'ultima candela 15m — mercato in consolidamento o assenza di segnale."
+
+    # ── Funding rate ──
+    fr_str = ''
+    if funding_rate is not None:
+        abs_fr = abs(funding_rate)
+        sign   = '+' if funding_rate >= 0 else ''
+        fr_str = f"\n💰 Funding rate: {sign}{funding_rate:.1f}% annuo"
+
+    return (
+        f"📋 <b>{sym}</b>  —  mini analisi VSA\n"
+        f"💲 Prezzo: <b>{p_fmt}</b>\n"
+        f"\n{bb_str}\n{ema_str}\n{vol_str}"
+        f"{pat_str}"
+        f"{fr_str}"
+    )
+
+
 def _fmt_price(p):
     if p is None: return '—'
     if p >= 1000: return f"${p:,.2f}"
