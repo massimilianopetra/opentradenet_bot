@@ -103,6 +103,7 @@ class HyperliquidPriceMonitor:
         self.scanner_enabled:   bool = False
         self.scanner_min_score: int  = 60
         self.scanner_chat_ids:  set  = set()
+        self.scanner_mode:      str  = 'vsa'   # 'vsa' | 'volume'
 
         # Stop Loss nativi: {chat_id: {symbol: {oid, dex, trigger_px, is_long}}}
         self.native_sl_orders: dict = {}

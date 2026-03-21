@@ -13,7 +13,7 @@ Inizializzazione obbligatoria prima di lanciare i task:
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Set, Optional, Tuple
 
 from hl_wallet import HyperliquidClient
@@ -820,27 +820,48 @@ async def candle_task(application) -> None:
             # Trigger scanner daemon (se attivo)
             if monitor.scanner_enabled and monitor.scanner_chat_ids:
                 try:
-                    opportunities = _mls.scan_all(min_score=monitor.scanner_min_score)
-                    for sym, signal in opportunities.items():
-                        direction = signal['direction']
-                        score     = signal['score']
-                        details   = signal.get('details', '')
-                        msg = (
-                            f"🤖 <b>ML Scanner</b> — {sym}\n"
-                            f"{'📈 LONG' if direction == 'LONG' else '📉 SHORT'} "
-                            f"score={score}/100\n"
-                            f"{details}"
-                        )
-                        for cid in list(monitor.scanner_chat_ids):
-                            try:
-                                await application.bot.send_message(
-                                    chat_id=cid, text=msg, parse_mode='HTML'
-                                )
-                            except Exception as e:
-                                logger.error(f"Errore invio scanner alert a {cid}: {e}")
+                    scan_mode = getattr(monitor, 'scanner_mode', 'vsa')
+                    chat_ids  = list(monitor.scanner_chat_ids)
 
-                    if opportunities:
-                        logger.info(f"🔍 Scanner: {len(opportunities)} opportunità trovate")
+                    if scan_mode == 'volume':
+                        # Volume spike daemon
+                        results = await asyncio.get_event_loop().run_in_executor(
+                            None, lambda: _mls.scan_volume(top_n=10)
+                        )
+                        if results:
+                            t = datetime.now(timezone.utc).replace(tzinfo=None).strftime('%H:%M')
+                            lines = [f"📊 <b>Volume Spike Daemon</b> [{t}]\n"]
+                            for r in results[:10]:
+                                usd = r.get('last_volume_usd', 0)
+                                if usd >= 1_000_000:
+                                    usd_fmt = f"${usd/1_000_000:.2f}M"
+                                elif usd >= 1_000:
+                                    usd_fmt = f"${usd/1_000:.1f}K"
+                                else:
+                                    usd_fmt = f"${usd:.2f}"
+                                vol_fmt = f"{r['last_volume']:,.0f}" if r['last_volume'] >= 1 else f"{r['last_volume']:.4f}"
+                                em = "🔴" if r['ratio'] > 3 else ("🟡" if r['ratio'] > 1.5 else "⚪")
+                                lines.append(f"{em} <b>{r['symbol']}</b>  x{r['ratio']:.2f}  {vol_fmt} ({usd_fmt})")
+                            msg = "\n".join(lines)
+                            for cid in chat_ids:
+                                try:
+                                    await application.bot.send_message(chat_id=cid, text=msg, parse_mode='HTML')
+                                except Exception as e:
+                                    logger.error(f"Errore invio volume daemon a {cid}: {e}")
+                            logger.info(f"📊 Volume daemon: {len(results)} spike inviati")
+
+                    else:
+                        # VSA daemon
+                        symbols = _mls.discover_symbols()
+                        await _mls.run_scan(
+                            symbols,
+                            min_score=monitor.scanner_min_score,
+                            dry_run=False,
+                            chat_ids=chat_ids,
+                            verbose=False,
+                            notify_empty=False,
+                        )
+                        logger.info("🧠 VSA daemon: scan completato")
 
                 except Exception as e:
                     logger.error(f"Errore scanner daemon: {e}", exc_info=True)

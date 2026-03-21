@@ -201,18 +201,46 @@ def scan_volume(top_n: int = 10) -> list:
         vols = data['volumes']
         if len(vols) < 2:
             continue
-        last_vol = vols[-1]
-        prev     = vols[-21:-1]           # fino a 20 candele precedenti
-        avg_vol  = sum(prev) / len(prev) if prev else 0.0
+        last_vol   = vols[-1]
+        last_close = data['closes'][-1]
+        prev       = vols[-21:-1]           # fino a 20 candele precedenti
+        avg_vol    = sum(prev) / len(prev) if prev else 0.0
         if avg_vol == 0:
             continue
         results.append({
-            'symbol':      sym,
-            'ratio':       last_vol / avg_vol,
-            'last_volume': last_vol,
-            'avg_volume':  avg_vol,
+            'symbol':          sym,
+            'ratio':           last_vol / avg_vol,
+            'last_volume':     last_vol,
+            'avg_volume':      avg_vol,
+            'last_volume_usd': last_vol * last_close,
         })
     results.sort(key=lambda r: r['ratio'], reverse=True)
+    return results[:top_n]
+
+
+def scan_vsa_top(top_n: int = 10) -> list:
+    """
+    Calcola lo score VSA su tutti i simboli disponibili e ritorna i top_n
+    ordinati per score decrescente. Non usa prezzi live né funding rates
+    (solo dati candele) per restare sincrono e veloce.
+
+    Dict keys: 'symbol', 'score', 'direction', 'patterns'
+    """
+    results = []
+    for sym in discover_symbols():
+        data = load_last_candles(sym, LOOKBACK)
+        if data is None:
+            continue
+        result = compute_opportunity(data)
+        if result:
+            results.append({
+                'symbol':    sym,
+                'score':     result['score'],
+                'direction': result['direction'],
+                'patterns':  result['patterns'],
+                'price':     result['price'],
+            })
+    results.sort(key=lambda r: r['score'], reverse=True)
     return results[:top_n]
 
 

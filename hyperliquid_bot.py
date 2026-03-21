@@ -910,12 +910,14 @@ def save_candles(symbol: str, candles: list) -> int:
 
 _SCAN_HELP = (
     "📡 *Scanner* — modalità disponibili:\n\n"
+    "`/scan vsa [N]`        — top N simboli per score VSA (def. 10)\n"
     "`/scan volume [N]`     — top N spike di volume su 15m (def. 10)\n"
-    "`/scan daemon [SCORE]` — scan VSA automatico ogni candela 15m\n"
+    "`/scan daemon vsa [SCORE]`    — alert VSA automatico ogni 15m (def.)\n"
+    "`/scan daemon volume [SCORE]` — alert volume spike automatico ogni 15m\n"
     "`/scan momentum`       — _coming soon_\n"
     "`/scan oi`             — _coming soon_\n"
     "`/scan [SYM] [SCORE]`  — scan VSA manuale (tutti o un simbolo)\n"
-    "\nEs: `/scan volume 5`  `/scan BTC`  `/scan 70`"
+    "\nEs: `/scan vsa 5`  `/scan volume 5`  `/scan BTC`  `/scan 70`"
 )
 
 
@@ -933,6 +935,43 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     mode = args[0].lower()
+
+    # ── vsa ──────────────────────────────────────────────────────────────────
+    if mode == 'vsa':
+        top_n = 10
+        if len(args) > 1 and args[1].isdigit():
+            top_n = max(1, int(args[1]))
+
+        await update.message.reply_text(f"🔍 Calcolo score VSA su {len(_mls.discover_symbols())} simboli...")
+        results = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: _mls.scan_vsa_top(top_n)
+        )
+        if not results:
+            await update.message.reply_text("📭 Nessun segnale VSA trovato.")
+            return
+
+        lines = [f"🧠 *Top {top_n} VSA Score* — 15m\n"]
+        for r in results:
+            score = r['score']
+            dirn  = r['direction']
+            if score >= 75:
+                em = "🔴" if dirn == 'SHORT' else "🟢"
+            elif score >= 55:
+                em = "🟡"
+            else:
+                em = "⚪"
+            dir_em  = "📈" if dirn == 'LONG' else "📉"
+            bar     = '▓' * (score // 20) + '░' * (5 - score // 20)
+            pnames  = ' · '.join(p['name'] for p in r['patterns'][:2])
+            price   = r.get('price', 0)
+            p_fmt   = f"${price:,.4f}" if price < 1 else f"${price:,.2f}"
+            lines.append(
+                f"{em} *{r['symbol']}*  {dir_em} {dirn}  {bar}  *{score}/100*\n"
+                f"   {p_fmt}  _{pnames}_"
+            )
+
+        await update.message.reply_text("\n".join(lines), parse_mode='Markdown')
+        return
 
     # ── volume ───────────────────────────────────────────────────────────────
     if mode == 'volume':
@@ -958,7 +997,14 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 em = "⚪"
             vol_fmt = f"{r['last_volume']:,.0f}" if r['last_volume'] >= 1 else f"{r['last_volume']:.4f}"
-            lines.append(f"{em} *{r['symbol']}*  x{ratio:.2f}  vol={vol_fmt}")
+            usd = r.get('last_volume_usd', 0)
+            if usd >= 1_000_000:
+                usd_fmt = f"${usd/1_000_000:.2f}M"
+            elif usd >= 1_000:
+                usd_fmt = f"${usd/1_000:.1f}K"
+            else:
+                usd_fmt = f"${usd:.2f}"
+            lines.append(f"{em} *{r['symbol']}*  x{ratio:.2f}  vol={vol_fmt} ({usd_fmt})")
 
         await update.message.reply_text("\n".join(lines), parse_mode='Markdown')
         return
@@ -975,18 +1021,24 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── daemon ───────────────────────────────────────────────────────────────
     if mode == 'daemon':
+        scan_mode  = 'vsa'
         min_score  = monitor.scanner_min_score
         recipients = list(monitor.spike_subscribers | monitor.tracking_enabled) or [chat_id]
         for arg in args[1:]:
-            if arg.isdigit():
+            al = arg.lower()
+            if al in ('vsa', 'volume'):
+                scan_mode = al
+            elif arg.isdigit():
                 min_score = int(arg)
         monitor.scanner_enabled   = True
+        monitor.scanner_mode      = scan_mode
         monitor.scanner_min_score = min_score
         monitor.scanner_chat_ids  = set(recipients)
         score_str = f" (soglia {min_score})" if min_score != 60 else ""
+        mode_label = "📊 Volume spike" if scan_mode == 'volume' else "🧠 VSA score"
         await update.message.reply_text(
-            f"🤖 *Scanner daemon attivato*{score_str}\n"
-            f"Scan automatico dopo ogni chiusura candela 15m.\n"
+            f"🤖 *Scanner daemon attivato* — {mode_label}{score_str}\n"
+            f"Check automatico dopo ogni chiusura candela 15m.\n"
             f"Alert inviati a {len(recipients)} utente/i.\n"
             f"Usa /scanstop per fermare.",
             parse_mode='Markdown'
@@ -1061,21 +1113,24 @@ async def scanstatus_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("❌ Non autorizzato.")
         return
 
-    stato   = "✅ ATTIVO" if monitor.scanner_enabled else "⏸ NON ATTIVO"
-    score   = monitor.scanner_min_score
-    n_users = len(monitor.scanner_chat_ids)
-    last    = _mls._last_signals
+    stato      = "✅ ATTIVO" if monitor.scanner_enabled else "⏸ NON ATTIVO"
+    scan_mode  = getattr(monitor, 'scanner_mode', 'vsa')
+    mode_label = "📊 Volume spike" if scan_mode == 'volume' else "🧠 VSA score"
+    score      = monitor.scanner_min_score
+    n_users    = len(monitor.scanner_chat_ids)
+    last       = _mls._last_signals
 
     last_str = ""
-    if last:
+    if last and scan_mode == 'vsa':
         recenti = sorted(last.items(), key=lambda x: x[1]['time'], reverse=True)[:5]
-        last_str = "\n\nUltimi segnali:\n" + "\n".join(
+        last_str = "\n\nUltimi segnali VSA:\n" + "\n".join(
             f"  {sym}: {v['direction']} score={v['score']} @ {v['time'].strftime('%H:%M')}"
             for sym, v in recenti
         )
 
     await update.message.reply_text(
         f"📡 *ML Scanner* — {stato}\n"
+        f"Modalità: {mode_label}\n"
         f"Soglia score: {score}/100\n"
         f"Utenti: {n_users}\n"
         f"Simboli disponibili: {len(_mls.discover_symbols())}"

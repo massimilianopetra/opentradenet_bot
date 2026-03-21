@@ -161,6 +161,7 @@ sudo systemctl status opentradenet_bot
 | `/start` | Messaggio di benvenuto e lista comandi |
 | `/help` | Lista comandi |
 | `/price SIMBOLO` | Prezzo corrente di un simbolo (es. `/price BTC`) |
+| `/spread SIMBOLO` | Spread bid/ask corrente (es. `/spread GOLD`) |
 | `/symbols` | Lista tutti i simboli disponibili |
 | `/symbols QUERY` | Cerca simboli (es. `/symbols sil`) |
 | `/stats` | Statistiche bot (utenti, simboli, polling, log) |
@@ -204,7 +205,8 @@ sudo systemctl status opentradenet_bot
 
 | Comando | Descrizione |
 |---|---|
-| `/stoploss SYM PREZZO` | Imposta stop loss (alert + chiusura) |
+| `/stoploss SYM PREZZO` | Imposta stop loss nativo (alert + chiusura automatica) |
+| `/cancelsl [SYM]` | Cancella stop loss nativo (tutti o per simbolo) |
 | `/takeprofit SYM PREZZO` | Imposta take profit con trailing stop |
 | `/orders` | Lista ordini condizionali attivi |
 | `/cancelcond ID` | Cancella ordine condizionale |
@@ -216,13 +218,25 @@ sudo systemctl status opentradenet_bot
 | `/chart SYM [N]` | Grafico candlestick 15m (es. `/chart GOLD 96`) |
 | `/analyze SYM` | Analisi tecnica AI: chart daily + 15m + setup suggerito |
 
-### ML Scanner
+### Scanner VSA
 
 | Comando | Descrizione |
 |---|---|
-| `/scan [SYM] [SCORE] [daemon]` | Scansione opportunità ML |
-| `/scanstop` | Ferma scanner daemon |
-| `/scanstatus` | Stato scanner e ultimi segnali |
+| `/scan vsa [N]` | Top N simboli per score VSA (def. 10) |
+| `/scan volume [N]` | Top N simboli per spike di volume 15m con valore $ (def. 10) |
+| `/scan SYM [SCORE]` | Scan VSA manuale su un simbolo con soglia score opzionale |
+| `/scan [SCORE]` | Scan VSA manuale su tutti i simboli |
+| `/scan daemon vsa [SCORE]` | Avvia daemon: alert VSA automatico dopo ogni candela 15m |
+| `/scan daemon volume` | Avvia daemon: alert volume spike automatico ogni 15m |
+| `/scanstop` | Ferma il daemon attivo |
+| `/scanstatus` | Modalità, soglia e ultimi segnali del daemon |
+
+### Admin
+
+| Comando | Descrizione |
+|---|---|
+| `/message all TESTO` | Broadcast a tutti gli utenti noti |
+| `/message CHAT_ID TESTO` | Messaggio diretto a una chat specifica |
 
 ---
 
@@ -330,9 +344,17 @@ python3 ml_trainer.py
 
 ### 3. Scanner — `ml_scanner.py`
 
-Daemon che ogni 15 minuti valuta tutti i simboli e invia alert Telegram per opportunità LONG/SHORT con score ≥ soglia.
+Valuta tutti i simboli con VSA (Volume Spread Analysis) + Bollinger Band + EMA + MACD + funding rate e produce uno score 0–100.
 
-Attivabile anche via bot con `/scan daemon`.
+Modalità disponibili via bot:
+
+| Modalità | Comando | Descrizione |
+|---|---|---|
+| Scan manuale VSA | `/scan [SYM] [SCORE]` | Analisi istantanea con alert completo |
+| Top VSA | `/scan vsa [N]` | Top N simboli per score, output compatto |
+| Top volume | `/scan volume [N]` | Top N spike di volume con valore in $ |
+| Daemon VSA | `/scan daemon vsa [SCORE]` | Alert automatico ogni chiusura candela 15m |
+| Daemon volume | `/scan daemon volume` | Summary volume spike ogni 15m |
 
 ### 4. Analisi AI — `ml_analyst.py`
 
