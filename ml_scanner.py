@@ -990,11 +990,11 @@ def format_mini_analysis(data, live_price: float = None, funding_rate: float = N
 
     # ── EMA trend ──
     ema_map = {
-        'strong_up':   '📈 Trend forte rialzista (EMA9>21>50)',
-        'up':          '📈 Trend rialzista (EMA9>21)',
+        'strong_up':   '📈 Trend forte rialzista (EMA9&gt;21&gt;50)',
+        'up':          '📈 Trend rialzista (EMA9&gt;21)',
         'flat':        '➡️  Trend piatto',
-        'down':        '📉 Trend ribassista (EMA9<21)',
-        'strong_down': '📉 Trend forte ribassista (EMA9<21<50)',
+        'down':        '📉 Trend ribassista (EMA9&lt;21)',
+        'strong_down': '📉 Trend forte ribassista (EMA9&lt;21&lt;50)',
     }
     ema_str = ema_map.get(ctx['ema_trend'], '➡️  EMA: n/d')
 
