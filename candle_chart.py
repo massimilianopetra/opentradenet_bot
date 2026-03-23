@@ -567,33 +567,34 @@ def plot_chart(data: dict, symbol: str, timeframe: str = '15m',
 
     # ── Evidenziazione pattern candlestick ───────────────────────────────
     if highlight_candles:
-        _dir_colors = {'LONG': '#26a641', 'SHORT': '#f85149', 'NEUTRAL': '#ffd700'}
-        # offset marcatori = 1.5% del range totale del grafico
+        _dir_colors  = {'LONG': '#26a641', 'SHORT': '#f85149', 'NEUTRAL': '#ffd700'}
         _chart_range = float(np.max(highs) - np.min(lows)) or 1.0
         _marker_off  = _chart_range * 0.018
+        _w_outline   = w_body * 1.6   # riquadro esterno più largo del corpo
 
-        for (hi_idx, hi_dir) in highlight_candles:
+        for entry in highlight_candles:
+            hi_idx  = entry[0]
+            hi_dir  = entry[1]
+            hi_name = entry[2] if len(entry) > 2 else ''
+
             if hi_idx < 0 or hi_idx >= n:
                 continue
-            hcol = _dir_colors.get(hi_dir, '#ffd700')
-            lo_b = min(opens[hi_idx], closes[hi_idx])
-            hi_b = max(opens[hi_idx], closes[hi_idx])
-            body_h = max(hi_b - lo_b, (highs[hi_idx] - lows[hi_idx]) * 0.002)
-            candle_rng = highs[hi_idx] - lows[hi_idx]
+            hcol       = _dir_colors.get(hi_dir, '#ffd700')
+            lo_b       = min(opens[hi_idx], closes[hi_idx])
+            hi_b       = max(opens[hi_idx], closes[hi_idx])
+            body_h     = max(hi_b - lo_b, (highs[hi_idx] - lows[hi_idx]) * 0.002)
+            candle_rng = max(highs[hi_idx] - lows[hi_idx], body_h)
 
-            # Rettangolo di sfondo sull'intera candela (low → high)
+            # Riquadro esterno (solo bordo, no fill) che circonda l'intera candela
             rect = mpatches.Rectangle(
-                (hi_idx - w_body / 2, lows[hi_idx]),
-                w_body, max(candle_rng, body_h * 1.2),
-                facecolor=hcol, alpha=0.18, zorder=1, linewidth=0
+                (hi_idx - _w_outline / 2, lows[hi_idx]),
+                _w_outline, candle_rng,
+                facecolor='none', edgecolor=hcol,
+                linewidth=2.0, alpha=0.9, zorder=8
             )
             ax1.add_patch(rect)
 
-            # Bordo spesso sul corpo della candela
-            ax1.bar(hi_idx, body_h, bottom=lo_b, width=w_body,
-                    color='none', edgecolor=hcol, linewidth=2.2, zorder=6)
-
-            # Marcatore direzionale
+            # Marcatore direzionale (freccia/diamante) — invariato
             if hi_dir == 'LONG':
                 ax1.scatter([hi_idx], [lows[hi_idx] - _marker_off],
                             marker='^', color=hcol, s=90, zorder=7, linewidths=0)
@@ -603,6 +604,40 @@ def plot_chart(data: dict, symbol: str, timeframe: str = '15m',
             else:
                 ax1.scatter([hi_idx], [(highs[hi_idx] + lows[hi_idx]) / 2],
                             marker='D', color=hcol, s=55, zorder=7, linewidths=0)
+
+            # Etichetta testuale con nome del pattern (ruotata 90°, fuori dalla candela)
+            if hi_name:
+                lbl = hi_name[:12]
+                if hi_dir == 'LONG':
+                    ax1.annotate(
+                        lbl,
+                        xy=(hi_idx, lows[hi_idx]),
+                        xytext=(hi_idx, lows[hi_idx] - _marker_off * 1.5),
+                        ha='center', va='top',
+                        fontsize=6, color=hcol, rotation=90,
+                        zorder=9,
+                        annotation_clip=False,
+                    )
+                elif hi_dir == 'SHORT':
+                    ax1.annotate(
+                        lbl,
+                        xy=(hi_idx, highs[hi_idx]),
+                        xytext=(hi_idx, highs[hi_idx] + _marker_off * 1.5),
+                        ha='center', va='bottom',
+                        fontsize=6, color=hcol, rotation=90,
+                        zorder=9,
+                        annotation_clip=False,
+                    )
+                else:
+                    ax1.annotate(
+                        lbl,
+                        xy=(hi_idx, (highs[hi_idx] + lows[hi_idx]) / 2),
+                        xytext=(hi_idx, (highs[hi_idx] + lows[hi_idx]) / 2),
+                        ha='center', va='center',
+                        fontsize=6, color=hcol, rotation=90,
+                        zorder=9,
+                        annotation_clip=False,
+                    )
 
     # Bollinger Bands
     valid_bb = ~np.isnan(bb_up)
