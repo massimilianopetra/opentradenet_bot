@@ -1299,5 +1299,281 @@ def main():
                              chat_ids, verbose=True, notify_empty=True))
 
 
+# ---------------------------------------------------------------------------
+# 11. PATTERN CANDLESTICK
+# ---------------------------------------------------------------------------
+
+def detect_candle_patterns(data: dict) -> list:
+    """
+    Rileva pattern candlestick sulle ultime candele.
+    data: dict con chiavi 'open', 'high', 'low', 'close' (liste di float).
+    Restituisce lista di dict con campi: name, direction, strength, description.
+    """
+    opens  = data['open']
+    highs  = data['high']
+    lows   = data['low']
+    closes = data['close']
+
+    n = len(closes)
+    if n < 1:
+        return []
+
+    patterns = []
+    i = n - 1  # indice ultima candela
+
+    # Candela corrente (i)
+    o0 = opens[i];  h0 = highs[i];  l0 = lows[i];  c0 = closes[i]
+    rng0        = max(h0 - l0, 1e-10)
+    body0       = abs(c0 - o0)
+    bull0       = c0 >= o0
+    upper_wick0 = h0 - max(c0, o0)
+    lower_wick0 = min(c0, o0) - l0
+
+    # Candela precedente (i-1)
+    if i >= 1:
+        o1 = opens[i-1]; h1 = highs[i-1]; l1 = lows[i-1]; c1 = closes[i-1]
+        rng1  = max(h1 - l1, 1e-10)
+        body1 = abs(c1 - o1)
+        bull1 = c1 >= o1
+    else:
+        o1 = h1 = l1 = c1 = rng1 = body1 = 0.0
+        bull1 = None
+
+    # Due candele fa (i-2)
+    if i >= 2:
+        o2 = opens[i-2]; h2 = highs[i-2]; l2 = lows[i-2]; c2 = closes[i-2]
+        rng2  = max(h2 - l2, 1e-10)
+        body2 = abs(c2 - o2)
+        bull2 = c2 >= o2
+    else:
+        o2 = h2 = l2 = c2 = rng2 = body2 = 0.0
+        bull2 = None
+
+    # ── SINGOLA CANDELA ──────────────────────────────────────────────────────
+    if body0 / rng0 < 0.10:
+        patterns.append({
+            'name': 'Doji', 'direction': 'NEUTRAL', 'strength': 1,
+            'description': 'Apertura e chiusura quasi identiche: mercato indeciso, attesa di un segnale direzionale',
+        })
+    elif body0 > 0 and lower_wick0 >= 2 * body0 and upper_wick0 <= body0 * 0.3:
+        if bull1 is not None and not bull1:
+            patterns.append({
+                'name': 'Hammer', 'direction': 'LONG', 'strength': 2,
+                'description': 'Coda inferiore lunga dopo candela bearish: i venditori non riescono a mantenere i minimi',
+            })
+        else:
+            patterns.append({
+                'name': 'Hanging Man', 'direction': 'SHORT', 'strength': 2,
+                'description': 'Coda inferiore lunga in contesto rialzista: possibile esaurimento dei compratori',
+            })
+    elif body0 > 0 and upper_wick0 >= 2 * body0 and lower_wick0 <= body0 * 0.3:
+        if bull1 is not None and bull1:
+            patterns.append({
+                'name': 'Shooting Star', 'direction': 'SHORT', 'strength': 2,
+                'description': 'Coda superiore lunga dopo candela bullish: i compratori rifiutati ai massimi, possibile inversione',
+            })
+        else:
+            patterns.append({
+                'name': 'Inverted Hammer', 'direction': 'LONG', 'strength': 2,
+                'description': 'Coda superiore lunga dopo ribasso: i compratori iniziano a reagire ai minimi',
+            })
+    elif bull0 and body0 / rng0 > 0.90:
+        patterns.append({
+            'name': 'Marubozu Rialzista', 'direction': 'LONG', 'strength': 2,
+            'description': 'Candela bullish senza ombre: dominio totale dei compratori per tutta la candela',
+        })
+    elif not bull0 and body0 / rng0 > 0.90:
+        patterns.append({
+            'name': 'Marubozu Ribassista', 'direction': 'SHORT', 'strength': 2,
+            'description': 'Candela bearish senza ombre: dominio totale dei venditori per tutta la candela',
+        })
+
+    # ── DUE CANDELE ──────────────────────────────────────────────────────────
+    if i >= 1 and bull1 is not None:
+        # Bullish / Bearish Engulfing
+        if not bull1 and bull0 and o0 <= c1 and c0 >= o1:
+            patterns.append({
+                'name': 'Bullish Engulfing', 'direction': 'LONG', 'strength': 3,
+                'description': 'La candela bullish ingloba completamente il corpo della precedente bearish: forte inversione rialzista',
+            })
+        elif bull1 and not bull0 and o0 >= c1 and c0 <= o1:
+            patterns.append({
+                'name': 'Bearish Engulfing', 'direction': 'SHORT', 'strength': 3,
+                'description': 'La candela bearish ingloba completamente il corpo della precedente bullish: forte inversione ribassista',
+            })
+
+        # Bullish / Bearish Harami
+        if (not bull1 and bull0 and body0 < body1 * 0.60
+                and o0 > min(c1, o1) and c0 < max(c1, o1)):
+            patterns.append({
+                'name': 'Bullish Harami', 'direction': 'LONG', 'strength': 2,
+                'description': 'Piccola candela bullish contenuta nel corpo della precedente bearish: esitazione dei venditori',
+            })
+        elif (bull1 and not bull0 and body0 < body1 * 0.60
+              and o0 < max(c1, o1) and c0 > min(c1, o1)):
+            patterns.append({
+                'name': 'Bearish Harami', 'direction': 'SHORT', 'strength': 2,
+                'description': 'Piccola candela bearish contenuta nel corpo della precedente bullish: esitazione dei compratori',
+            })
+
+        # Tweezer Bottom
+        if not bull1 and bull0:
+            ref_range = max(rng0, rng1)
+            if ref_range > 0 and abs(l0 - l1) / ref_range < 0.05:
+                patterns.append({
+                    'name': 'Tweezer Bottom', 'direction': 'LONG', 'strength': 2,
+                    'description': 'Due minimi quasi identici con inversione di direzione: supporto forte confermato',
+                })
+
+        # Tweezer Top
+        if bull1 and not bull0:
+            ref_range = max(rng0, rng1)
+            if ref_range > 0 and abs(h0 - h1) / ref_range < 0.05:
+                patterns.append({
+                    'name': 'Tweezer Top', 'direction': 'SHORT', 'strength': 2,
+                    'description': 'Due massimi quasi identici con inversione di direzione: resistenza forte confermata',
+                })
+
+    # ── TRE CANDELE ──────────────────────────────────────────────────────────
+    if i >= 2 and bull2 is not None:
+        midpoint_first = (o2 + c2) / 2.0
+
+        # Morning Star / Evening Star
+        if (not bull2 and body2 / rng2 > 0.4
+                and body1 < body2 * 0.40
+                and bull0 and c0 > midpoint_first):
+            patterns.append({
+                'name': 'Morning Star', 'direction': 'LONG', 'strength': 3,
+                'description': 'Stella del mattino: esaurimento del ribasso, piccola pausa, rimbalzo deciso sopra il punto medio',
+            })
+        elif (bull2 and body2 / rng2 > 0.4
+              and body1 < body2 * 0.40
+              and not bull0 and c0 < midpoint_first):
+            patterns.append({
+                'name': 'Evening Star', 'direction': 'SHORT', 'strength': 3,
+                'description': 'Stella della sera: esaurimento del rialzo, piccola pausa, caduta decisa sotto il punto medio',
+            })
+
+        # Three White Soldiers / Three Black Crows
+        if (bull0 and bull1 and bull2
+                and c0 > c1 and c1 > c2
+                and o0 > o1 and o1 > o2
+                and body0 / rng0 > 0.60 and body1 / rng1 > 0.60 and body2 / rng2 > 0.60):
+            patterns.append({
+                'name': 'Three White Soldiers', 'direction': 'LONG', 'strength': 3,
+                'description': 'Tre candele bullish consecutive con corpi ampi e massimi crescenti: trend rialzista molto forte',
+            })
+        elif (not bull0 and not bull1 and not bull2
+              and c0 < c1 and c1 < c2
+              and o0 < o1 and o1 < o2
+              and body0 / rng0 > 0.60 and body1 / rng1 > 0.60 and body2 / rng2 > 0.60):
+            patterns.append({
+                'name': 'Three Black Crows', 'direction': 'SHORT', 'strength': 3,
+                'description': 'Tre candele bearish consecutive con corpi ampi e minimi decrescenti: trend ribassista molto forte',
+            })
+
+    # ── STREAK ───────────────────────────────────────────────────────────────
+    lookback_n   = min(10, n)
+    streak_is_bull = bull0
+    streak_count = 0
+    for j in range(i, max(i - lookback_n, -1), -1):
+        if (closes[j] >= opens[j]) == streak_is_bull:
+            streak_count += 1
+        else:
+            break
+
+    if streak_count >= 4:
+        s = 3 if streak_count >= 7 else 2
+        if streak_is_bull:
+            patterns.append({
+                'name': f'Streak Up x{streak_count}', 'direction': 'SHORT', 'strength': s,
+                'description': f'{streak_count} candele rialziste consecutive: possibile esaurimento dei compratori, attenzione a inversione',
+            })
+        else:
+            patterns.append({
+                'name': f'Streak Down x{streak_count}', 'direction': 'LONG', 'strength': s,
+                'description': f'{streak_count} candele ribassiste consecutive: possibile esaurimento dei venditori, attenzione a rimbalzo',
+            })
+
+    return patterns
+
+
+def scan_patterns_top(top_n: int = 10) -> list:
+    """
+    Scansiona tutti i simboli disponibili e restituisce i top_n per punteggio
+    di pattern candlestick (somma della strength di tutti i pattern trovati).
+
+    Dict keys: 'symbol', 'patterns', 'strength', 'price'
+    """
+    results = []
+    for sym in discover_symbols():
+        data = load_last_candles(sym, 20)
+        if data is None:
+            continue
+        pattern_data = {
+            'open':  data['opens'],
+            'high':  data['highs'],
+            'low':   data['lows'],
+            'close': data['closes'],
+        }
+        pats = detect_candle_patterns(pattern_data)
+        if not pats:
+            continue
+        total_strength = sum(p['strength'] for p in pats)
+        results.append({
+            'symbol':   sym,
+            'patterns': pats,
+            'strength': total_strength,
+            'price':    data['closes'][-1],
+        })
+    results.sort(key=lambda r: r['strength'], reverse=True)
+    return results[:top_n]
+
+
+def format_pattern_alert(r: dict) -> str:
+    """
+    Formatta un messaggio HTML per Telegram a partire da un risultato
+    di scan_patterns_top.
+    """
+    sym      = r['symbol']
+    price    = r['price']
+    patterns = r['patterns']
+
+    # Formato prezzo
+    if price >= 1000:
+        p_fmt = f"${price:,.2f}"
+    elif price >= 1:
+        p_fmt = f"${price:.3f}"
+    else:
+        p_fmt = f"${price:.6f}"
+
+    # Direzione dominante
+    long_str  = sum(p['strength'] for p in patterns if p['direction'] == 'LONG')
+    short_str = sum(p['strength'] for p in patterns if p['direction'] == 'SHORT')
+    if long_str > short_str:
+        dominant = 'LONG'
+        dom_em   = '📈'
+    elif short_str > long_str:
+        dominant = 'SHORT'
+        dom_em   = '📉'
+    else:
+        dominant = 'NEUTRAL'
+        dom_em   = '➡️'
+
+    lines = [
+        f"🕯 <b>{sym}</b>  {dom_em} {dominant}  —  {p_fmt}",
+        "─────────────────────",
+    ]
+
+    dir_emoji = {'LONG': '📈', 'SHORT': '📉', 'NEUTRAL': '➡️'}
+    for p in patterns:
+        d_em  = dir_emoji.get(p['direction'], '➡️')
+        stars = '★' * p['strength'] + '☆' * (3 - p['strength'])
+        lines.append(f"{d_em} <b>{p['name']}</b>  [{stars}]  {p['direction']}")
+        lines.append(f"   <i>{p['description']}</i>")
+
+    return '\n'.join(lines)
+
+
 if __name__ == '__main__':
     main()

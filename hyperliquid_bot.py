@@ -912,12 +912,13 @@ _SCAN_HELP = (
     "📡 *Scanner* — modalità disponibili:\n\n"
     "`/scan vsa [N]`        — top N simboli per score VSA (def. 10)\n"
     "`/scan volume [N]`     — top N spike di volume su 15m (def. 10)\n"
+    "`/scan pattern [N]`    — top N simboli per pattern candlestick (def. 10)\n"
     "`/scan daemon vsa [SCORE]`    — alert VSA automatico ogni 15m (def.)\n"
     "`/scan daemon volume [SCORE]` — alert volume spike automatico ogni 15m\n"
-    "`/scan momentum`       — _coming soon_\n"
+    "`/scan daemon pattern`        — alert pattern candlestick automatico ogni 15m\n"
     "`/scan oi`             — _coming soon_\n"
     "`/scan [SYM] [SCORE]`  — scan VSA manuale (tutti o un simbolo)\n"
-    "\nEs: `/scan vsa 5`  `/scan volume 5`  `/scan BTC`  `/scan 70`"
+    "\nEs: `/scan vsa 5`  `/scan volume 5`  `/scan pattern 5`  `/scan BTC`  `/scan 70`"
 )
 
 
@@ -1009,6 +1010,30 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("\n".join(lines), parse_mode='Markdown')
         return
 
+    # ── pattern ──────────────────────────────────────────────────────────────
+    if mode == 'pattern':
+        top_n = 10
+        if len(args) > 1 and args[1].isdigit():
+            top_n = max(1, int(args[1]))
+
+        await update.message.reply_text(
+            f"🔍 Analisi pattern candlestick su {len(_mls.discover_symbols())} simboli..."
+        )
+        results = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: _mls.scan_patterns_top(top_n)
+        )
+        if not results:
+            await update.message.reply_text("📭 Nessun pattern candlestick trovato.")
+            return
+
+        for r in results:
+            msg = _mls.format_pattern_alert(r)
+            try:
+                await update.message.reply_text(msg, parse_mode='HTML')
+            except Exception as e:
+                logger.error(f"Errore invio pattern alert: {e}")
+        return
+
     # ── stub: momentum ───────────────────────────────────────────────────────
     if mode == 'momentum':
         await update.message.reply_text("🚧 Modalità *momentum* — coming soon.", parse_mode='Markdown')
@@ -1026,7 +1051,7 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         recipients = list(monitor.spike_subscribers | monitor.tracking_enabled) or [chat_id]
         for arg in args[1:]:
             al = arg.lower()
-            if al in ('vsa', 'volume'):
+            if al in ('vsa', 'volume', 'pattern'):
                 scan_mode = al
             elif arg.isdigit():
                 min_score = int(arg)
@@ -1035,7 +1060,12 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         monitor.scanner_min_score = min_score
         monitor.scanner_chat_ids  = set(recipients)
         score_str = f" (soglia {min_score})" if min_score != 60 else ""
-        mode_label = "📊 Volume spike" if scan_mode == 'volume' else "🧠 VSA score"
+        if scan_mode == 'volume':
+            mode_label = "📊 Volume spike"
+        elif scan_mode == 'pattern':
+            mode_label = "🕯 Pattern candlestick"
+        else:
+            mode_label = "🧠 VSA score"
         await update.message.reply_text(
             f"🤖 *Scanner daemon attivato* — {mode_label}{score_str}\n"
             f"Check automatico dopo ogni chiusura candela 15m.\n"
@@ -1051,7 +1081,7 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for arg in args:
         if arg.isdigit():
             min_score = int(arg)
-        elif arg.lower() not in ('vsa',):
+        elif arg.lower() not in ('vsa', 'pattern', 'volume'):
             symbol = arg.upper()
 
     symbols = [symbol] if symbol else _mls.discover_symbols()
@@ -1134,9 +1164,14 @@ async def scanstatus_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("❌ Non autorizzato.")
         return
 
-    stato      = "✅ ATTIVO" if monitor.scanner_enabled else "⏸ NON ATTIVO"
-    scan_mode  = getattr(monitor, 'scanner_mode', 'vsa')
-    mode_label = "📊 Volume spike" if scan_mode == 'volume' else "🧠 VSA score"
+    stato     = "✅ ATTIVO" if monitor.scanner_enabled else "⏸ NON ATTIVO"
+    scan_mode = getattr(monitor, 'scanner_mode', 'vsa')
+    if scan_mode == 'volume':
+        mode_label = "📊 Volume spike"
+    elif scan_mode == 'pattern':
+        mode_label = "🕯 Pattern candlestick"
+    else:
+        mode_label = "🧠 VSA score"
     score      = monitor.scanner_min_score
     n_users    = len(monitor.scanner_chat_ids)
     last       = _mls._last_signals

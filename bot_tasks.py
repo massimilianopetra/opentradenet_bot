@@ -850,6 +850,22 @@ async def candle_task(application) -> None:
                                     logger.error(f"Errore invio volume daemon a {cid}: {e}")
                             logger.info(f"📊 Volume daemon: {len(results)} spike inviati")
 
+                    elif scan_mode == 'pattern':
+                        # Pattern candlestick daemon
+                        results = await asyncio.get_event_loop().run_in_executor(
+                            None, lambda: _mls.scan_patterns_top(10)
+                        )
+                        for r in results:
+                            msg = _mls.format_pattern_alert(r)
+                            for cid in chat_ids:
+                                try:
+                                    await application.bot.send_message(
+                                        chat_id=cid, text=msg, parse_mode='HTML'
+                                    )
+                                except Exception as e:
+                                    logger.error(f"Errore invio pattern daemon a {cid}: {e}")
+                        logger.info(f"🕯 Pattern daemon: {len(results)} alert inviati")
+
                     else:
                         # VSA daemon
                         symbols = _mls.discover_symbols()
