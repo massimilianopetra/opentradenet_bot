@@ -484,14 +484,18 @@ def _x_labels(timestamps: list, tf: str, max_labels: int = 8) -> tuple:
 # Plot principale
 # ---------------------------------------------------------------------------
 
-def plot_chart(data: dict, symbol: str, timeframe: str = '15m') -> plt.Figure:
+def plot_chart(data: dict, symbol: str, timeframe: str = '15m',
+               highlight_candles: list | None = None) -> plt.Figure:
     """
     Genera il grafico a 4 pannelli: candele+BB+EMA+S&R, volume, RSI, MACD.
 
     Args:
-        data:       output di load_csv()
-        symbol:     nome simbolo (per il titolo)
-        timeframe:  '15m' | '1H' | '1D'
+        data:               output di load_csv()
+        symbol:             nome simbolo (per il titolo)
+        timeframe:          '15m' | '1H' | '1D'
+        highlight_candles:  lista opzionale di (indice, direzione) per evidenziare
+                            candele che formano un pattern. direzione: 'LONG' | 'SHORT' | 'NEUTRAL'.
+                            Default None = nessuna annotazione.
 
     Returns:
         matplotlib Figure
@@ -560,6 +564,45 @@ def plot_chart(data: dict, symbol: str, timeframe: str = '15m') -> plt.Figure:
         ax1.bar(i, body_h,   bottom=lo_b,   width=w_body,  color=col,    zorder=3)
         ax1.bar(i, highs[i] - lows[i], bottom=lows[i], width=w_wick * 0.12,
                 color=col, zorder=2)
+
+    # ── Evidenziazione pattern candlestick ───────────────────────────────
+    if highlight_candles:
+        _dir_colors = {'LONG': '#26a641', 'SHORT': '#f85149', 'NEUTRAL': '#ffd700'}
+        # offset marcatori = 1.5% del range totale del grafico
+        _chart_range = float(np.max(highs) - np.min(lows)) or 1.0
+        _marker_off  = _chart_range * 0.018
+
+        for (hi_idx, hi_dir) in highlight_candles:
+            if hi_idx < 0 or hi_idx >= n:
+                continue
+            hcol = _dir_colors.get(hi_dir, '#ffd700')
+            lo_b = min(opens[hi_idx], closes[hi_idx])
+            hi_b = max(opens[hi_idx], closes[hi_idx])
+            body_h = max(hi_b - lo_b, (highs[hi_idx] - lows[hi_idx]) * 0.002)
+            candle_rng = highs[hi_idx] - lows[hi_idx]
+
+            # Rettangolo di sfondo sull'intera candela (low → high)
+            rect = mpatches.Rectangle(
+                (hi_idx - w_body / 2, lows[hi_idx]),
+                w_body, max(candle_rng, body_h * 1.2),
+                facecolor=hcol, alpha=0.18, zorder=1, linewidth=0
+            )
+            ax1.add_patch(rect)
+
+            # Bordo spesso sul corpo della candela
+            ax1.bar(hi_idx, body_h, bottom=lo_b, width=w_body,
+                    color='none', edgecolor=hcol, linewidth=2.2, zorder=6)
+
+            # Marcatore direzionale
+            if hi_dir == 'LONG':
+                ax1.scatter([hi_idx], [lows[hi_idx] - _marker_off],
+                            marker='^', color=hcol, s=90, zorder=7, linewidths=0)
+            elif hi_dir == 'SHORT':
+                ax1.scatter([hi_idx], [highs[hi_idx] + _marker_off],
+                            marker='v', color=hcol, s=90, zorder=7, linewidths=0)
+            else:
+                ax1.scatter([hi_idx], [(highs[hi_idx] + lows[hi_idx]) / 2],
+                            marker='D', color=hcol, s=55, zorder=7, linewidths=0)
 
     # Bollinger Bands
     valid_bb = ~np.isnan(bb_up)

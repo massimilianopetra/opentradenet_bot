@@ -1012,26 +1012,116 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── pattern ──────────────────────────────────────────────────────────────
     if mode == 'pattern':
-        top_n = 10
-        if len(args) > 1 and args[1].isdigit():
-            top_n = max(1, int(args[1]))
+        top_n  = 10
+        symbol = None
+        for arg in args[1:]:
+            if arg.isdigit():
+                top_n = max(1, int(arg))
+            elif arg.lower() not in ('pattern',):
+                symbol = arg.upper()
 
-        await update.message.reply_text(
-            f"🔍 Analisi pattern candlestick su {len(_mls.discover_symbols())} simboli..."
-        )
-        results = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: _mls.scan_patterns_top(top_n)
-        )
-        if not results:
-            await update.message.reply_text("📭 Nessun pattern candlestick trovato.")
-            return
+        if symbol:
+            # ── Scan singolo simbolo con chart annotato ───────────────────────
+            await update.message.reply_text(
+                f"🔍 Analisi pattern candlestick per {symbol}..."
+            )
+            try:
+                csv_path = cc.find_csv(symbol, CANDLES_DIR)
+            except FileNotFoundError:
+                await update.message.reply_text(f"❌ Nessun dato candele per {symbol}.")
+                return
 
-        for r in results:
+            try:
+                chart_data = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: cc.load_csv(csv_path, 80, '15m')
+                )
+            except Exception as e:
+                await update.message.reply_text(f"❌ Errore lettura candele {symbol}: {e}")
+                return
+
+            pattern_data = {
+                'open':  list(chart_data['opens']),
+                'high':  list(chart_data['highs']),
+                'low':   list(chart_data['lows']),
+                'close': list(chart_data['closes']),
+            }
+            pats = _mls.detect_candle_patterns(pattern_data)
+
+            if not pats:
+                await update.message.reply_text(
+                    f"📭 Nessun pattern candlestick attivo su {symbol} sull'ultima candela 15m."
+                )
+                return
+
+            r = {
+                'symbol':   symbol,
+                'patterns': pats,
+                'strength': sum(p['strength'] for p in pats),
+                'price':    float(chart_data['closes'][-1]),
+            }
             msg = _mls.format_pattern_alert(r)
             try:
                 await update.message.reply_text(msg, parse_mode='HTML')
             except Exception as e:
-                logger.error(f"Errore invio pattern alert: {e}")
+                logger.error(f"Errore invio pattern singolo {symbol}: {e}")
+
+            # Genera e invia chart con candele del pattern evidenziate
+            try:
+                # Raccoglie indici unici; LONG/SHORT prevale su NEUTRAL; conflitto → NEUTRAL
+                idx_dir: dict = {}
+                for p in pats:
+                    for ci in p.get('candle_indices', []):
+                        if ci < 0 or ci >= len(chart_data['closes']):
+                            continue
+                        d        = p['direction']
+                        existing = idx_dir.get(ci)
+                        if existing is None or existing == 'NEUTRAL':
+                            idx_dir[ci] = d
+                        elif existing != d and d != 'NEUTRAL':
+                            idx_dir[ci] = 'NEUTRAL'
+                highlight = list(idx_dir.items())
+
+                fig = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: cc.plot_chart(chart_data, symbol, '15m',
+                                          highlight_candles=highlight)
+                )
+                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                    tmp_path = tmp.name
+                fig.savefig(tmp_path, dpi=110, bbox_inches='tight', facecolor='#0d1117')
+                plt.close(fig)
+                with open(tmp_path, 'rb') as f:
+                    await update.message.reply_photo(
+                        photo=f,
+                        caption=f"🕯 Pattern candlestick — {symbol} 15m"
+                    )
+                import os as _os
+                _os.unlink(tmp_path)
+            except Exception as e:
+                logger.error(f"Errore generazione chart pattern {symbol}: {e}")
+
+        else:
+            # ── Top-N scan multi-simbolo ──────────────────────────────────────
+            n_syms = len(_mls.discover_symbols())
+            await update.message.reply_text(
+                f"🔍 Analisi pattern candlestick su {n_syms} simboli...\n"
+                f"_(verranno mostrati solo i simboli con pattern attivi sull'ultima candela)_",
+                parse_mode='Markdown'
+            )
+            results = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: _mls.scan_patterns_top(top_n)
+            )
+            if not results:
+                await update.message.reply_text("📭 Nessun pattern candlestick trovato.")
+                return
+
+            for r in results:
+                msg = _mls.format_pattern_alert(r)
+                try:
+                    await update.message.reply_text(msg, parse_mode='HTML')
+                except Exception as e:
+                    logger.error(f"Errore invio pattern alert: {e}")
+
         return
 
     # ── stub: momentum ───────────────────────────────────────────────────────

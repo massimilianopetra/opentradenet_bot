@@ -1307,7 +1307,10 @@ def detect_candle_patterns(data: dict) -> list:
     """
     Rileva pattern candlestick sulle ultime candele.
     data: dict con chiavi 'open', 'high', 'low', 'close' (liste di float).
-    Restituisce lista di dict con campi: name, direction, strength, description.
+    Restituisce lista di dict con campi:
+      name, direction, strength, description, candle_indices
+    dove candle_indices è la lista di indici assoluti nell'array data
+    delle candele che formano il pattern.
     """
     opens  = data['open']
     highs  = data['high']
@@ -1354,38 +1357,45 @@ def detect_candle_patterns(data: dict) -> list:
         patterns.append({
             'name': 'Doji', 'direction': 'NEUTRAL', 'strength': 1,
             'description': 'Apertura e chiusura quasi identiche: mercato indeciso, attesa di un segnale direzionale',
+            'candle_indices': [i],
         })
     elif body0 > 0 and lower_wick0 >= 2 * body0 and upper_wick0 <= body0 * 0.3:
         if bull1 is not None and not bull1:
             patterns.append({
                 'name': 'Hammer', 'direction': 'LONG', 'strength': 2,
                 'description': 'Coda inferiore lunga dopo candela bearish: i venditori non riescono a mantenere i minimi',
+                'candle_indices': [i],
             })
         else:
             patterns.append({
                 'name': 'Hanging Man', 'direction': 'SHORT', 'strength': 2,
                 'description': 'Coda inferiore lunga in contesto rialzista: possibile esaurimento dei compratori',
+                'candle_indices': [i],
             })
     elif body0 > 0 and upper_wick0 >= 2 * body0 and lower_wick0 <= body0 * 0.3:
         if bull1 is not None and bull1:
             patterns.append({
                 'name': 'Shooting Star', 'direction': 'SHORT', 'strength': 2,
                 'description': 'Coda superiore lunga dopo candela bullish: i compratori rifiutati ai massimi, possibile inversione',
+                'candle_indices': [i],
             })
         else:
             patterns.append({
                 'name': 'Inverted Hammer', 'direction': 'LONG', 'strength': 2,
                 'description': 'Coda superiore lunga dopo ribasso: i compratori iniziano a reagire ai minimi',
+                'candle_indices': [i],
             })
     elif bull0 and body0 / rng0 > 0.90:
         patterns.append({
             'name': 'Marubozu Rialzista', 'direction': 'LONG', 'strength': 2,
             'description': 'Candela bullish senza ombre: dominio totale dei compratori per tutta la candela',
+            'candle_indices': [i],
         })
     elif not bull0 and body0 / rng0 > 0.90:
         patterns.append({
             'name': 'Marubozu Ribassista', 'direction': 'SHORT', 'strength': 2,
             'description': 'Candela bearish senza ombre: dominio totale dei venditori per tutta la candela',
+            'candle_indices': [i],
         })
 
     # ── DUE CANDELE ──────────────────────────────────────────────────────────
@@ -1395,11 +1405,13 @@ def detect_candle_patterns(data: dict) -> list:
             patterns.append({
                 'name': 'Bullish Engulfing', 'direction': 'LONG', 'strength': 3,
                 'description': 'La candela bullish ingloba completamente il corpo della precedente bearish: forte inversione rialzista',
+                'candle_indices': [i-1, i],
             })
         elif bull1 and not bull0 and o0 >= c1 and c0 <= o1:
             patterns.append({
                 'name': 'Bearish Engulfing', 'direction': 'SHORT', 'strength': 3,
                 'description': 'La candela bearish ingloba completamente il corpo della precedente bullish: forte inversione ribassista',
+                'candle_indices': [i-1, i],
             })
 
         # Bullish / Bearish Harami
@@ -1408,12 +1420,14 @@ def detect_candle_patterns(data: dict) -> list:
             patterns.append({
                 'name': 'Bullish Harami', 'direction': 'LONG', 'strength': 2,
                 'description': 'Piccola candela bullish contenuta nel corpo della precedente bearish: esitazione dei venditori',
+                'candle_indices': [i-1, i],
             })
         elif (bull1 and not bull0 and body0 < body1 * 0.60
               and o0 < max(c1, o1) and c0 > min(c1, o1)):
             patterns.append({
                 'name': 'Bearish Harami', 'direction': 'SHORT', 'strength': 2,
                 'description': 'Piccola candela bearish contenuta nel corpo della precedente bullish: esitazione dei compratori',
+                'candle_indices': [i-1, i],
             })
 
         # Tweezer Bottom
@@ -1423,6 +1437,7 @@ def detect_candle_patterns(data: dict) -> list:
                 patterns.append({
                     'name': 'Tweezer Bottom', 'direction': 'LONG', 'strength': 2,
                     'description': 'Due minimi quasi identici con inversione di direzione: supporto forte confermato',
+                    'candle_indices': [i-1, i],
                 })
 
         # Tweezer Top
@@ -1432,6 +1447,7 @@ def detect_candle_patterns(data: dict) -> list:
                 patterns.append({
                     'name': 'Tweezer Top', 'direction': 'SHORT', 'strength': 2,
                     'description': 'Due massimi quasi identici con inversione di direzione: resistenza forte confermata',
+                    'candle_indices': [i-1, i],
                 })
 
     # ── TRE CANDELE ──────────────────────────────────────────────────────────
@@ -1445,6 +1461,7 @@ def detect_candle_patterns(data: dict) -> list:
             patterns.append({
                 'name': 'Morning Star', 'direction': 'LONG', 'strength': 3,
                 'description': 'Stella del mattino: esaurimento del ribasso, piccola pausa, rimbalzo deciso sopra il punto medio',
+                'candle_indices': [i-2, i-1, i],
             })
         elif (bull2 and body2 / rng2 > 0.4
               and body1 < body2 * 0.40
@@ -1452,6 +1469,7 @@ def detect_candle_patterns(data: dict) -> list:
             patterns.append({
                 'name': 'Evening Star', 'direction': 'SHORT', 'strength': 3,
                 'description': 'Stella della sera: esaurimento del rialzo, piccola pausa, caduta decisa sotto il punto medio',
+                'candle_indices': [i-2, i-1, i],
             })
 
         # Three White Soldiers / Three Black Crows
@@ -1462,6 +1480,7 @@ def detect_candle_patterns(data: dict) -> list:
             patterns.append({
                 'name': 'Three White Soldiers', 'direction': 'LONG', 'strength': 3,
                 'description': 'Tre candele bullish consecutive con corpi ampi e massimi crescenti: trend rialzista molto forte',
+                'candle_indices': [i-2, i-1, i],
             })
         elif (not bull0 and not bull1 and not bull2
               and c0 < c1 and c1 < c2
@@ -1470,12 +1489,13 @@ def detect_candle_patterns(data: dict) -> list:
             patterns.append({
                 'name': 'Three Black Crows', 'direction': 'SHORT', 'strength': 3,
                 'description': 'Tre candele bearish consecutive con corpi ampi e minimi decrescenti: trend ribassista molto forte',
+                'candle_indices': [i-2, i-1, i],
             })
 
     # ── STREAK ───────────────────────────────────────────────────────────────
-    lookback_n   = min(10, n)
+    lookback_n     = min(10, n)
     streak_is_bull = bull0
-    streak_count = 0
+    streak_count   = 0
     for j in range(i, max(i - lookback_n, -1), -1):
         if (closes[j] >= opens[j]) == streak_is_bull:
             streak_count += 1
@@ -1483,16 +1503,19 @@ def detect_candle_patterns(data: dict) -> list:
             break
 
     if streak_count >= 4:
-        s = 3 if streak_count >= 7 else 2
+        s            = 3 if streak_count >= 7 else 2
+        streak_idxs  = list(range(i - streak_count + 1, i + 1))
         if streak_is_bull:
             patterns.append({
                 'name': f'Streak Up x{streak_count}', 'direction': 'SHORT', 'strength': s,
                 'description': f'{streak_count} candele rialziste consecutive: possibile esaurimento dei compratori, attenzione a inversione',
+                'candle_indices': streak_idxs,
             })
         else:
             patterns.append({
                 'name': f'Streak Down x{streak_count}', 'direction': 'LONG', 'strength': s,
                 'description': f'{streak_count} candele ribassiste consecutive: possibile esaurimento dei venditori, attenzione a rimbalzo',
+                'candle_indices': streak_idxs,
             })
 
     return patterns
