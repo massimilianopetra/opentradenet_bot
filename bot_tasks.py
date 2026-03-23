@@ -363,7 +363,7 @@ async def price_polling_task(application) -> None:
                             if _trk:
                                 _entry = _trk['entry_px']
                                 _sz    = _trk['size']
-                                _pnl   = (_entry - current_px) * _sz if not is_long else (current_px - _entry) * _sz
+                                _pnl   = (current_px - _entry) * _sz
                                 _pnl_s = "+" if _pnl >= 0 else ""
                                 pnl_line = f"\nPnL stimato: {_pnl_s}${_pnl:.2f}"
 
