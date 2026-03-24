@@ -605,19 +605,22 @@ def _draw_pattern_panel(ax, opens, highs, lows, closes, n, pattern_info):
 
 
 def plot_chart(data: dict, symbol: str, timeframe: str = '15m',
-               pattern_info: list | None = None) -> plt.Figure:
+               pattern_info: list | None = None,
+               show_trendlines: bool = True) -> plt.Figure:
     """
     Genera il grafico a 4 pannelli: candele+BB+EMA+S&R, volume, RSI, MACD.
     Se pattern_info non è None aggiunge un 5° pannello con le ultime 5 candele
     e le etichette dei pattern rilevati.
 
     Args:
-        data:         output di load_csv()
-        symbol:       nome simbolo (per il titolo)
-        timeframe:    '15m' | '1H' | '1D'
-        pattern_info: lista di dict con campi name, direction, candle_indices.
-                      Se None il pannello pattern non viene aggiunto e il
-                      grafico è identico alla versione precedente.
+        data:            output di load_csv()
+        symbol:          nome simbolo (per il titolo)
+        timeframe:       '15m' | '1H' | '1D'
+        pattern_info:    lista di dict con campi name, direction, candle_indices.
+                         Se None il pannello pattern non viene aggiunto e il
+                         grafico è identico alla versione precedente.
+        show_trendlines: se False salta calcolo e disegno di supporti/resistenze
+                         orizzontali e trendline inclinate (default True).
 
     Returns:
         matplotlib Figure
@@ -641,17 +644,21 @@ def plot_chart(data: dict, symbol: str, timeframe: str = '15m',
     vol_ma = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma[i] = np.mean(volumes[i - 19 : i + 1])
-    resistances, supports = _pivot_levels(highs, lows)
-    # Trendline dinamiche (adatta pivot_window al numero di candele disponibili)
-    pwin = max(3, min(7, n // 20))
-    trendlines = _trendlines(highs, lows, n,
-                             pivot_window=pwin,
-                             tolerance_pct=0.5,
-                             max_violation_pct=1.0,
-                             max_violations=1,
-                             min_touches=2,
-                             max_lines=3,
-                             extend_bars=max(5, n // 10))
+    if show_trendlines:
+        resistances, supports = _pivot_levels(highs, lows)
+        pwin       = max(3, min(7, n // 20))
+        trendlines = _trendlines(highs, lows, n,
+                                 pivot_window=pwin,
+                                 tolerance_pct=0.5,
+                                 max_violation_pct=1.0,
+                                 max_violations=1,
+                                 min_touches=2,
+                                 max_lines=3,
+                                 extend_bars=max(5, n // 10))
+    else:
+        resistances = []
+        supports    = []
+        trendlines  = {'resistance': [], 'support': []}
 
     # ── Layout ──────────────────────────────────────────────────────────
     if pattern_info is not None:

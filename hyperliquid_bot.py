@@ -1,5 +1,6 @@
 import asyncio
 import csv
+import json
 import logging
 import logging.handlers
 import os
@@ -140,6 +141,12 @@ else:
 
 DATA_DIR    = Path(os.getenv('DATA_DIR', 'data'))
 wallet_store = WalletStore(DATA_DIR, _enc_key)
+
+# Preferenze grafico per-utente: mostrare le trendline S/R?
+# Persistito in data/chart_prefs/trendlines.json — caricato in post_init.
+# Default False: le trendline sono nascoste finché l'utente non fa /chartlines on.
+_CHART_PREFS_FILE: Path = DATA_DIR / 'chart_prefs' / 'trendlines.json'
+_chart_trendlines: dict = {}   # chat_id (int) → bool
 
 
 # ---------------------------------------------------------------------------
@@ -731,7 +738,8 @@ async def chart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if _live_px:
             data = cc.append_live_candle(data, float(_live_px))
 
-        fig = cc.plot_chart(data, symbol, timeframe)
+        fig = cc.plot_chart(data, symbol, timeframe,
+                            show_trendlines=_chart_trendlines.get(update.effective_chat.id, False))
 
         with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
             tmp_path = tmp.name
@@ -2004,7 +2012,8 @@ async def _prepare_order(update, chat_id, symbol, usd, is_buy):
             # Candela live: usa il prezzo già recuperato per la conferma (zero API extra)
             _chart_data = cc.append_live_candle(_chart_data, float(price))
             _fig = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: cc.plot_chart(_chart_data, symbol, '15m')
+                None, lambda: cc.plot_chart(_chart_data, symbol, '15m',
+                                            show_trendlines=_chart_trendlines.get(chat_id, False))
             )
             with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as _tmp:
                 _chart_tmp = _tmp.name
@@ -2784,6 +2793,59 @@ async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Lifecycle
 # ---------------------------------------------------------------------------
 
+def _load_chart_prefs() -> None:
+    """Carica le preferenze trendline da disco in _chart_trendlines."""
+    global _chart_trendlines
+    try:
+        if _CHART_PREFS_FILE.exists():
+            raw = json.loads(_CHART_PREFS_FILE.read_text(encoding='utf-8'))
+            _chart_trendlines = {int(k): bool(v) for k, v in raw.items()}
+            logger.info(f"chart_prefs caricato: {len(_chart_trendlines)} utenti")
+    except Exception as e:
+        logger.warning(f"chart_prefs load failed: {e}")
+        _chart_trendlines = {}
+
+
+def _save_chart_prefs() -> None:
+    """Salva _chart_trendlines su disco."""
+    try:
+        _CHART_PREFS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _CHART_PREFS_FILE.write_text(
+            json.dumps({str(k): v for k, v in _chart_trendlines.items()}, indent=2),
+            encoding='utf-8'
+        )
+    except Exception as e:
+        logger.warning(f"chart_prefs save failed: {e}")
+
+
+async def chartlines_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/chartlines [on|off] — attiva/disattiva le trendline S/R nel grafico."""
+    chat_id = update.effective_chat.id
+
+    if not context.args:
+        state = _chart_trendlines.get(chat_id, False)
+        label  = "attive"   if state else "nascoste"
+        toggle = "off"      if state else "on"
+        hint   = "nasconderle" if state else "attivarle"
+        await update.message.reply_text(
+            f"📊 Linee di supporto/resistenza: {label}\n"
+            f"Usa /chartlines {toggle} per {hint}"
+        )
+        return
+
+    arg = context.args[0].lower()
+    if arg == 'on':
+        _chart_trendlines[chat_id] = True
+        _save_chart_prefs()
+        await update.message.reply_text("📊 Linee di supporto/resistenza: attivate ✅")
+    elif arg == 'off':
+        _chart_trendlines[chat_id] = False
+        _save_chart_prefs()
+        await update.message.reply_text("📊 Linee di supporto/resistenza: nascoste 🔕")
+    else:
+        await update.message.reply_text("Uso: /chartlines on|off")
+
+
 async def post_init(application: Application):
     logger.info(f"Bot avviato. POLL={POLL_INTERVAL}s THRESHOLD={PRICE_CHANGE_THRESHOLD}%")
 
@@ -2802,6 +2864,8 @@ async def post_init(application: Application):
     total_conds = sum(len(v) for v in monitor.conditional_orders.values())
     if total_conds:
         logger.info(f"Ordini condizionali caricati: {total_conds}")
+
+    _load_chart_prefs()
 
     ctx = TaskContext(
         monitor=monitor,
@@ -2998,7 +3062,8 @@ def main():
     app.add_handler(CommandHandler("takeprofit",   takeprofit_command))
     app.add_handler(CommandHandler("orders",       orders_command))
     app.add_handler(CommandHandler("cancelcond",   cancelcond_command))
-    app.add_handler(CommandHandler("chart", chart_command))
+    app.add_handler(CommandHandler("chart",       chart_command))
+    app.add_handler(CommandHandler("chartlines",  chartlines_command))
     app.add_handler(CommandHandler("scan",         scan_command))
     app.add_handler(CommandHandler("analyze",      analyze_command))
     app.add_handler(CommandHandler("scanstop",     scanstop_command))
