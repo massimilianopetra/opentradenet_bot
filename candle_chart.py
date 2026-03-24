@@ -33,7 +33,6 @@ from pathlib import Path
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
 import numpy as np
 
 # ---------------------------------------------------------------------------
@@ -484,18 +483,95 @@ def _x_labels(timestamps: list, tf: str, max_labels: int = 8) -> tuple:
 # Plot principale
 # ---------------------------------------------------------------------------
 
+def _draw_pattern_panel(ax, opens, highs, lows, closes, n, pattern_info):
+    """
+    Disegna il pannello delle ultime 5 candele con etichette pattern.
+    Usato internamente da plot_chart quando pattern_info non è None.
+    """
+    _DIR_COLORS = {'LONG': '#26a641', 'SHORT': '#f85149', 'NEUTRAL': '#ffd700'}
+
+    num_candles = min(5, n)
+    start_idx   = n - num_candles
+
+    # Mappa abs_idx → (name, direction, strength): per ogni candela prende il
+    # pattern con strength maggiore tra quelli che la includono.
+    candle_pattern_map = {}
+    for pat in pattern_info:
+        for ci in pat.get('candle_indices', []):
+            if ci < 0 or ci >= n:
+                continue
+            existing = candle_pattern_map.get(ci)
+            if existing is None or pat['strength'] > existing[2]:
+                candle_pattern_map[ci] = (pat['name'], pat['direction'], pat['strength'])
+
+    ax.set_facecolor('#0d1117')
+    ax.tick_params(colors='#8b949e', labelsize=8)
+    for spine in ax.spines.values():
+        spine.set_color('#30363d')
+    ax.yaxis.label.set_color('#8b949e')
+
+    w_body = 0.35
+    seg_highs = highs[start_idx : start_idx + num_candles]
+    seg_lows  = lows[start_idx  : start_idx + num_candles]
+
+    for local_idx in range(num_candles):
+        abs_idx = start_idx + local_idx
+        o = opens[abs_idx];  h = highs[abs_idx]
+        l = lows[abs_idx];   c = closes[abs_idx]
+        bull   = c >= o
+        col    = '#26a641' if bull else '#f85149'
+        lo_b   = min(o, c);  hi_b = max(o, c)
+        body_h = max(hi_b - lo_b, (h - l) * 0.002)
+        ax.bar(local_idx, body_h,  bottom=lo_b, width=w_body,        color=col, zorder=3)
+        ax.bar(local_idx, h - l,   bottom=l,    width=w_body * 0.15, color=col, zorder=2)
+
+    y_min   = float(np.min(seg_lows))
+    y_max   = float(np.max(seg_highs))
+    y_range = max(y_max - y_min, abs(y_max + y_min) * 0.001, 1e-8)
+    y_label = y_min - y_range * 0.14
+
+    for local_idx in range(num_candles):
+        abs_idx = start_idx + local_idx
+        rel_pos = local_idx - (num_candles - 1)   # -4 … 0
+
+        pat_entry = candle_pattern_map.get(abs_idx)
+        if pat_entry:
+            label      = pat_entry[0]
+            color      = _DIR_COLORS.get(pat_entry[1], '#ffd700')
+            fontweight = 'bold'
+        else:
+            label      = str(rel_pos)
+            color      = '#c9d1d9'
+            fontweight = 'normal'
+
+        ax.text(local_idx, y_label, label,
+                ha='center', va='top', fontsize=8,
+                color=color, fontweight=fontweight, clip_on=False)
+
+    ax.set_xlim(-0.7, num_candles - 0.3)
+    ax.set_ylim(y_label - y_range * 0.04, y_max + y_range * 0.12)
+    ax.set_xticks([])
+    ax.set_yticks([])
+
+    pat_names = ', '.join(dict.fromkeys(p['name'] for p in pattern_info))
+    ax.set_title(f'\U0001f56f Pattern rilevato \u2014 {pat_names}',
+                 color='white', fontsize=9, loc='left', pad=4)
+
+
 def plot_chart(data: dict, symbol: str, timeframe: str = '15m',
-               highlight_candles: list | None = None) -> plt.Figure:
+               pattern_info: list | None = None) -> plt.Figure:
     """
     Genera il grafico a 4 pannelli: candele+BB+EMA+S&R, volume, RSI, MACD.
+    Se pattern_info non è None aggiunge un 5° pannello con le ultime 5 candele
+    e le etichette dei pattern rilevati.
 
     Args:
-        data:               output di load_csv()
-        symbol:             nome simbolo (per il titolo)
-        timeframe:          '15m' | '1H' | '1D'
-        highlight_candles:  lista opzionale di (indice, direzione) per evidenziare
-                            candele che formano un pattern. direzione: 'LONG' | 'SHORT' | 'NEUTRAL'.
-                            Default None = nessuna annotazione.
+        data:         output di load_csv()
+        symbol:       nome simbolo (per il titolo)
+        timeframe:    '15m' | '1H' | '1D'
+        pattern_info: lista di dict con campi name, direction, candle_indices.
+                      Se None il pannello pattern non viene aggiunto e il
+                      grafico è identico alla versione precedente.
 
     Returns:
         matplotlib Figure
@@ -532,10 +608,16 @@ def plot_chart(data: dict, symbol: str, timeframe: str = '15m',
                              extend_bars=max(5, n // 10))
 
     # ── Layout ──────────────────────────────────────────────────────────
-    fig = plt.figure(figsize=(16, 12), facecolor='#0d1117')
-    gs  = fig.add_gridspec(4, 1, height_ratios=[5, 1.5, 1.5, 1.5],
-                           hspace=0.05, left=0.07, right=0.97,
-                           top=0.94, bottom=0.06)
+    if pattern_info is not None:
+        fig = plt.figure(figsize=(16, 16), facecolor='#0d1117')
+        gs  = fig.add_gridspec(5, 1, height_ratios=[5, 1.5, 1.5, 1.5, 2.5],
+                               hspace=0.08, left=0.07, right=0.97,
+                               top=0.94, bottom=0.06)
+    else:
+        fig = plt.figure(figsize=(16, 12), facecolor='#0d1117')
+        gs  = fig.add_gridspec(4, 1, height_ratios=[5, 1.5, 1.5, 1.5],
+                               hspace=0.05, left=0.07, right=0.97,
+                               top=0.94, bottom=0.06)
 
     ax1 = fig.add_subplot(gs[0])
     ax2 = fig.add_subplot(gs[1], sharex=ax1)
@@ -564,80 +646,6 @@ def plot_chart(data: dict, symbol: str, timeframe: str = '15m',
         ax1.bar(i, body_h,   bottom=lo_b,   width=w_body,  color=col,    zorder=3)
         ax1.bar(i, highs[i] - lows[i], bottom=lows[i], width=w_wick * 0.12,
                 color=col, zorder=2)
-
-    # ── Evidenziazione pattern candlestick ───────────────────────────────
-    if highlight_candles:
-        _dir_colors  = {'LONG': '#26a641', 'SHORT': '#f85149', 'NEUTRAL': '#ffd700'}
-        _chart_range = float(np.max(highs) - np.min(lows)) or 1.0
-        _marker_off  = _chart_range * 0.018
-        _w_outline   = w_body * 1.6   # riquadro esterno più largo del corpo
-
-        for entry in highlight_candles:
-            hi_idx  = entry[0]
-            hi_dir  = entry[1]
-            hi_name = entry[2] if len(entry) > 2 else ''
-
-            if hi_idx < 0 or hi_idx >= n:
-                continue
-            hcol       = _dir_colors.get(hi_dir, '#ffd700')
-            lo_b       = min(opens[hi_idx], closes[hi_idx])
-            hi_b       = max(opens[hi_idx], closes[hi_idx])
-            body_h     = max(hi_b - lo_b, (highs[hi_idx] - lows[hi_idx]) * 0.002)
-            candle_rng = max(highs[hi_idx] - lows[hi_idx], body_h)
-
-            # Riquadro esterno (solo bordo, no fill) che circonda l'intera candela
-            rect = mpatches.Rectangle(
-                (hi_idx - _w_outline / 2, lows[hi_idx]),
-                _w_outline, candle_rng,
-                facecolor='none', edgecolor=hcol,
-                linewidth=2.0, alpha=0.9, zorder=8
-            )
-            ax1.add_patch(rect)
-
-            # Marcatore direzionale (freccia/diamante) — invariato
-            if hi_dir == 'LONG':
-                ax1.scatter([hi_idx], [lows[hi_idx] - _marker_off],
-                            marker='^', color=hcol, s=90, zorder=7, linewidths=0)
-            elif hi_dir == 'SHORT':
-                ax1.scatter([hi_idx], [highs[hi_idx] + _marker_off],
-                            marker='v', color=hcol, s=90, zorder=7, linewidths=0)
-            else:
-                ax1.scatter([hi_idx], [(highs[hi_idx] + lows[hi_idx]) / 2],
-                            marker='D', color=hcol, s=55, zorder=7, linewidths=0)
-
-            # Etichetta testuale con nome del pattern (ruotata 90°, fuori dalla candela)
-            if hi_name:
-                lbl = hi_name[:12]
-                if hi_dir == 'LONG':
-                    ax1.annotate(
-                        lbl,
-                        xy=(hi_idx, lows[hi_idx]),
-                        xytext=(hi_idx, lows[hi_idx] - _marker_off * 1.5),
-                        ha='center', va='top',
-                        fontsize=6, color=hcol, rotation=90,
-                        zorder=9,
-                        annotation_clip=False,
-                    )
-                elif hi_dir == 'SHORT':
-                    ax1.annotate(
-                        lbl,
-                        xy=(hi_idx, highs[hi_idx]),
-                        xytext=(hi_idx, highs[hi_idx] + _marker_off * 1.5),
-                        ha='center', va='bottom',
-                        fontsize=6, color=hcol, rotation=90,
-                        zorder=9,
-                        annotation_clip=False,
-                    )
-                else:
-                    ax1.annotate(
-                        lbl,
-                        xy=(hi_idx, (highs[hi_idx] + lows[hi_idx]) / 2),
-                        xytext=(hi_idx, (highs[hi_idx] + lows[hi_idx]) / 2),
-                        ha='center', va='center',
-                        fontsize=6, color=hcol, rotation=90,
-                        zorder=9,
-                        annotation_clip=False,
-                    )
 
     # Bollinger Bands
     valid_bb = ~np.isnan(bb_up)
@@ -743,11 +751,17 @@ def plot_chart(data: dict, symbol: str, timeframe: str = '15m',
 
     # ── Asse X ───────────────────────────────────────────────────────────
     x_pos, x_lbl = _x_labels(timestamps, timeframe)
-    ax4.set_xticks(x_pos)
-    ax4.set_xticklabels(x_lbl, rotation=30, ha='right', fontsize=7)
     plt.setp(ax1.get_xticklabels(), visible=False)
     plt.setp(ax2.get_xticklabels(), visible=False)
     plt.setp(ax3.get_xticklabels(), visible=False)
+
+    if pattern_info is not None:
+        plt.setp(ax4.get_xticklabels(), visible=False)
+        ax5 = fig.add_subplot(gs[4])
+        _draw_pattern_panel(ax5, opens, highs, lows, closes, n, pattern_info)
+    else:
+        ax4.set_xticks(x_pos)
+        ax4.set_xticklabels(x_lbl, rotation=30, ha='right', fontsize=7)
 
     return fig
 

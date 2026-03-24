@@ -1065,29 +1065,12 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.error(f"Errore invio pattern singolo {symbol}: {e}")
 
-            # Genera e invia chart con candele del pattern evidenziate
+            # Genera e invia chart con pannello pattern in fondo
             try:
-                # Raccoglie indici unici con direzione e nome pattern.
-                # LONG/SHORT prevale su NEUTRAL; conflitto LONG vs SHORT → NEUTRAL.
-                # idx_dir[ci] = (direction, name)
-                idx_dir: dict = {}
-                for p in pats:
-                    for ci in p.get('candle_indices', []):
-                        if ci < 0 or ci >= len(chart_data['closes']):
-                            continue
-                        d        = p['direction']
-                        pname    = p.get('name', '')
-                        existing = idx_dir.get(ci)
-                        if existing is None or existing[0] == 'NEUTRAL':
-                            idx_dir[ci] = (d, pname)
-                        elif existing[0] != d and d != 'NEUTRAL':
-                            idx_dir[ci] = ('NEUTRAL', existing[1])
-                highlight = [(ci, info[0], info[1]) for ci, info in idx_dir.items()]
-
                 fig = await asyncio.get_event_loop().run_in_executor(
                     None,
                     lambda: cc.plot_chart(chart_data, symbol, '15m',
-                                          highlight_candles=highlight)
+                                          pattern_info=pats)
                 )
                 with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
                     tmp_path = tmp.name
