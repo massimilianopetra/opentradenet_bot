@@ -539,14 +539,14 @@ def _draw_pattern_panel(ax, opens, highs, lows, closes, n, pattern_info):
             label      = pat_entry[0]
             color      = _DIR_COLORS.get(pat_entry[1], '#ffd700')
             fontweight = 'bold'
+            ax.text(local_idx, y_label, label,
+                    ha='right', va='top', fontsize=8, rotation=45,
+                    color=color, fontweight=fontweight, clip_on=False)
         else:
-            label      = str(rel_pos)
-            color      = '#c9d1d9'
-            fontweight = 'normal'
-
-        ax.text(local_idx, y_label, label,
-                ha='center', va='top', fontsize=8,
-                color=color, fontweight=fontweight, clip_on=False)
+            label = str(rel_pos)
+            ax.text(local_idx, y_label, label,
+                    ha='center', va='top', fontsize=8, rotation=0,
+                    color='#c9d1d9', fontweight='normal', clip_on=False)
 
     ax.set_xlim(-0.7, num_candles - 0.3)
     ax.set_ylim(y_label - y_range * 0.04, y_max + y_range * 0.12)

@@ -1324,6 +1324,18 @@ def detect_candle_patterns(data: dict) -> list:
     patterns = []
     i = n - 1  # indice ultima candela
 
+    # ATR medio: media semplice dei range delle ultime 20 candele (esclusa quella corrente)
+    _atr_window = highs[max(0, i-20):i]
+    _atr_lows   = lows[max(0, i-20):i]
+    if _atr_window:
+        avg_atr = sum(
+            _atr_window[k] - _atr_lows[k]
+            for k in range(len(_atr_window))
+        ) / len(_atr_window)
+    else:
+        avg_atr = max(highs[i] - lows[i], 1e-10)
+    avg_atr = max(avg_atr, 1e-10)
+
     # Candela corrente (i)
     o0 = opens[i];  h0 = highs[i];  l0 = lows[i];  c0 = closes[i]
     rng0        = max(h0 - l0, 1e-10)
@@ -1353,13 +1365,13 @@ def detect_candle_patterns(data: dict) -> list:
         bull2 = None
 
     # ── SINGOLA CANDELA ──────────────────────────────────────────────────────
-    if body0 / rng0 < 0.10:
+    if rng0 >= avg_atr * 0.10 and body0 / rng0 < 0.10:
         patterns.append({
             'name': 'Doji', 'direction': 'NEUTRAL', 'strength': 1,
             'description': 'Apertura e chiusura quasi identiche: mercato indeciso, attesa di un segnale direzionale',
             'candle_indices': [i],
         })
-    elif body0 > 0 and lower_wick0 >= 2 * body0 and upper_wick0 <= body0 * 0.3:
+    elif rng0 >= avg_atr * 0.20 and body0 > 0 and lower_wick0 >= 2 * body0 and upper_wick0 <= body0 * 0.3:
         if bull1 is not None and not bull1:
             patterns.append({
                 'name': 'Hammer', 'direction': 'LONG', 'strength': 2,
@@ -1372,7 +1384,7 @@ def detect_candle_patterns(data: dict) -> list:
                 'description': 'Coda inferiore lunga in contesto rialzista: possibile esaurimento dei compratori',
                 'candle_indices': [i],
             })
-    elif body0 > 0 and upper_wick0 >= 2 * body0 and lower_wick0 <= body0 * 0.3:
+    elif rng0 >= avg_atr * 0.20 and body0 > 0 and upper_wick0 >= 2 * body0 and lower_wick0 <= body0 * 0.3:
         if bull1 is not None and bull1:
             patterns.append({
                 'name': 'Shooting Star', 'direction': 'SHORT', 'strength': 2,
@@ -1385,13 +1397,13 @@ def detect_candle_patterns(data: dict) -> list:
                 'description': 'Coda superiore lunga dopo ribasso: i compratori iniziano a reagire ai minimi',
                 'candle_indices': [i],
             })
-    elif bull0 and body0 / rng0 > 0.90:
+    elif bull0 and body0 >= avg_atr * 0.30 and body0 / rng0 > 0.90:
         patterns.append({
             'name': 'Marubozu Rialzista', 'direction': 'LONG', 'strength': 2,
             'description': 'Candela bullish senza ombre: dominio totale dei compratori per tutta la candela',
             'candle_indices': [i],
         })
-    elif not bull0 and body0 / rng0 > 0.90:
+    elif not bull0 and body0 >= avg_atr * 0.30 and body0 / rng0 > 0.90:
         patterns.append({
             'name': 'Marubozu Ribassista', 'direction': 'SHORT', 'strength': 2,
             'description': 'Candela bearish senza ombre: dominio totale dei venditori per tutta la candela',
