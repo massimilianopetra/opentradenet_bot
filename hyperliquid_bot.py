@@ -114,6 +114,11 @@ ADMIN_CHAT_ID = int(os.getenv('ADMIN_CHAT_ID', '0')) or None
 
 WALLET_ENCRYPTION_KEY = os.getenv('WALLET_ENCRYPTION_KEY', '')
 
+# Se true, invia il grafico candlestick 15m del simbolo prima del messaggio di
+# conferma ordine (/long, /short). Non blocca l'ordine in caso di errore.
+# Controllato da ORDER_CONFIRM_CHART=true nel file .env (default: false).
+ORDER_CONFIRM_CHART = os.getenv('ORDER_CONFIRM_CHART', 'false').lower() == 'true'
+
 
 if not TELEGRAM_TOKEN:
     logger.error("❌ TELEGRAM_TOKEN non trovato nel file .env")
@@ -1982,6 +1987,35 @@ async def _prepare_order(update, chat_id, symbol, usd, is_buy):
             )
     except Exception:
         pass
+
+    # Grafico candlestick pre-conferma — solo se ORDER_CONFIRM_CHART=true nel .env
+    if ORDER_CONFIRM_CHART:
+        _chart_tmp = None
+        try:
+            _csv_path   = cc.find_csv(symbol, Path(CANDLES_DIR))
+            _chart_data = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: cc.load_csv(_csv_path, 80, '15m')
+            )
+            _fig = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: cc.plot_chart(_chart_data, symbol, '15m')
+            )
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as _tmp:
+                _chart_tmp = _tmp.name
+            _fig.savefig(_chart_tmp, dpi=110, bbox_inches='tight', facecolor='#0d1117')
+            plt.close(_fig)
+            with open(_chart_tmp, 'rb') as _img:
+                await update.message.reply_photo(
+                    photo=_img,
+                    caption=f"📊 {symbol} — 15m"
+                )
+        except Exception as _chart_exc:
+            logger.debug(f"_prepare_order chart {symbol}: {_chart_exc}")
+        finally:
+            if _chart_tmp:
+                try:
+                    os.unlink(_chart_tmp)
+                except Exception:
+                    pass
 
     keyboard = InlineKeyboardMarkup([[
         InlineKeyboardButton("✅ Conferma", callback_data="order_confirm"),
