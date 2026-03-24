@@ -817,67 +817,74 @@ async def candle_task(application) -> None:
                 + (f" ({errors} errori)" if errors else "")
             )
 
-            # Trigger scanner daemon (se attivo)
-            if monitor.scanner_enabled and monitor.scanner_chat_ids:
+            # Trigger scanner daemon (se ci sono utenti iscritti)
+            if monitor.scanner_enabled and monitor.scanner_subscribers:
                 try:
-                    scan_mode = getattr(monitor, 'scanner_mode', 'vsa')
-                    chat_ids  = list(monitor.scanner_chat_ids)
+                    from collections import defaultdict
 
-                    if scan_mode == 'volume':
-                        # Volume spike daemon
-                        results = await asyncio.get_event_loop().run_in_executor(
-                            None, lambda: _mls.scan_volume(top_n=10)
-                        )
-                        if results:
-                            t = datetime.now(timezone.utc).replace(tzinfo=None).strftime('%H:%M')
-                            lines = [f"📊 <b>Volume Spike Daemon</b> [{t}]\n"]
-                            for r in results[:10]:
-                                usd = r.get('last_volume_usd', 0)
-                                if usd >= 1_000_000:
-                                    usd_fmt = f"${usd/1_000_000:.2f}M"
-                                elif usd >= 1_000:
-                                    usd_fmt = f"${usd/1_000:.1f}K"
-                                else:
-                                    usd_fmt = f"${usd:.2f}"
-                                vol_fmt = f"{r['last_volume']:,.0f}" if r['last_volume'] >= 1 else f"{r['last_volume']:.4f}"
-                                em = "🔴" if r['ratio'] > 3 else ("🟡" if r['ratio'] > 1.5 else "⚪")
-                                lines.append(f"{em} <b>{r['symbol']}</b>  x{r['ratio']:.2f}  {vol_fmt} ({usd_fmt})")
-                            msg = "\n".join(lines)
-                            for cid in chat_ids:
-                                try:
-                                    await application.bot.send_message(chat_id=cid, text=msg, parse_mode='HTML')
-                                except Exception as e:
-                                    logger.error(f"Errore invio volume daemon a {cid}: {e}")
-                            logger.info(f"📊 Volume daemon: {len(results)} spike inviati")
+                    # Raggruppa utenti per modalità (ogni modalità scansionata una sola volta)
+                    by_mode: dict = defaultdict(list)
+                    for cid, cfg in monitor.scanner_subscribers.items():
+                        by_mode[cfg['mode']].append((cid, cfg['min_score']))
 
-                    elif scan_mode == 'pattern':
-                        # Pattern candlestick daemon
-                        results = await asyncio.get_event_loop().run_in_executor(
-                            None, lambda: _mls.scan_patterns_top(10)
-                        )
-                        for r in results:
-                            msg = _mls.format_pattern_alert(r)
-                            for cid in chat_ids:
-                                try:
-                                    await application.bot.send_message(
-                                        chat_id=cid, text=msg, parse_mode='HTML'
-                                    )
-                                except Exception as e:
-                                    logger.error(f"Errore invio pattern daemon a {cid}: {e}")
-                        logger.info(f"🕯 Pattern daemon: {len(results)} alert inviati")
+                    for scan_mode, users in by_mode.items():
 
-                    else:
-                        # VSA daemon
-                        symbols = _mls.discover_symbols()
-                        await _mls.run_scan(
-                            symbols,
-                            min_score=monitor.scanner_min_score,
-                            dry_run=False,
-                            chat_ids=chat_ids,
-                            verbose=False,
-                            notify_empty=False,
-                        )
-                        logger.info("🧠 VSA daemon: scan completato")
+                        if scan_mode == 'volume':
+                            results = await asyncio.get_event_loop().run_in_executor(
+                                None, lambda: _mls.scan_volume(top_n=10)
+                            )
+                            if results:
+                                t = datetime.now(timezone.utc).replace(tzinfo=None).strftime('%H:%M')
+                                lines = [f"📊 <b>Volume Spike Daemon</b> [{t}]\n"]
+                                for r in results[:10]:
+                                    usd = r.get('last_volume_usd', 0)
+                                    if usd >= 1_000_000:
+                                        usd_fmt = f"${usd/1_000_000:.2f}M"
+                                    elif usd >= 1_000:
+                                        usd_fmt = f"${usd/1_000:.1f}K"
+                                    else:
+                                        usd_fmt = f"${usd:.2f}"
+                                    vol_fmt = f"{r['last_volume']:,.0f}" if r['last_volume'] >= 1 else f"{r['last_volume']:.4f}"
+                                    em = "🔴" if r['ratio'] > 3 else ("🟡" if r['ratio'] > 1.5 else "⚪")
+                                    lines.append(f"{em} <b>{r['symbol']}</b>  x{r['ratio']:.2f}  {vol_fmt} ({usd_fmt})")
+                                msg = "\n".join(lines)
+                                for (cid, _) in users:
+                                    try:
+                                        await application.bot.send_message(chat_id=cid, text=msg, parse_mode='HTML')
+                                    except Exception as e:
+                                        logger.error(f"Errore invio volume daemon a {cid}: {e}")
+                            logger.info(f"📊 Volume daemon: {len(results)} spike, {len(users)} utenti")
+
+                        elif scan_mode == 'pattern':
+                            results = await asyncio.get_event_loop().run_in_executor(
+                                None, lambda: _mls.scan_patterns_top(10)
+                            )
+                            for r in results:
+                                msg = _mls.format_pattern_alert(r)
+                                for (cid, _) in users:
+                                    try:
+                                        await application.bot.send_message(
+                                            chat_id=cid, text=msg, parse_mode='HTML'
+                                        )
+                                    except Exception as e:
+                                        logger.error(f"Errore invio pattern daemon a {cid}: {e}")
+                            logger.info(f"🕯 Pattern daemon: {len(results)} alert, {len(users)} utenti")
+
+                        else:
+                            # VSA — scan unico, poi filtra per soglia per-utente
+                            symbols = _mls.discover_symbols()
+                            all_results = await _mls.scan_vsa_results(symbols)
+                            for (cid, min_score) in users:
+                                filtered = [r for r in all_results if r.get('score', 0) >= min_score]
+                                for r in filtered:
+                                    try:
+                                        msg = _mls.format_alert(r)
+                                        await application.bot.send_message(
+                                            chat_id=cid, text=msg, parse_mode='HTML'
+                                        )
+                                    except Exception as e:
+                                        logger.error(f"Errore invio VSA daemon a {cid}: {e}")
+                            logger.info(f"🧠 VSA daemon: scan completato, {len(users)} utenti")
 
                 except Exception as e:
                     logger.error(f"Errore scanner daemon: {e}", exc_info=True)

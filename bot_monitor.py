@@ -100,10 +100,12 @@ class HyperliquidPriceMonitor:
         self.session: Optional[aiohttp.ClientSession] = None
 
         # ML Scanner
-        self.scanner_enabled:   bool = False
-        self.scanner_min_score: int  = 60
-        self.scanner_chat_ids:  set  = set()
-        self.scanner_mode:      str  = 'vsa'   # 'vsa' | 'volume'
+        self.scanner_enabled:      bool = False
+        self.scanner_min_score:    int  = 60
+        self.scanner_chat_ids:     set  = set()   # deprecato, mantenuto per compatibilità
+        self.scanner_mode:         str  = 'vsa'   # 'vsa' | 'volume'
+        # daemon per-utente: {chat_id: {'mode': 'vsa'|'volume'|'pattern', 'min_score': int}}
+        self.scanner_subscribers:  dict = {}
 
         # Stop Loss nativi: {chat_id: {symbol: {oid, dex, trigger_px, is_long}}}
         self.native_sl_orders: dict = {}

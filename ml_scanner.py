@@ -1123,6 +1123,33 @@ async def send_telegram(message, chat_ids):
 # 8. SCAN
 # ---------------------------------------------------------------------------
 
+async def scan_vsa_results(symbols: list) -> list:
+    """
+    Esegue lo scan VSA su tutti i simboli e ritorna la lista grezza dei risultati
+    senza filtrare per soglia e senza inviare nulla.
+    Usato dal daemon per-utente in bot_tasks.py: ogni utente filtra con la sua min_score.
+    Ritorna lista di dict ordinata per score decrescente.
+    """
+    live_prices, funding_map = await asyncio.gather(
+        fetch_live_prices(),
+        _fetch_all_funding_rates(),
+    )
+    results = []
+    for sym in symbols:
+        if not is_market_open(sym):
+            continue
+        data = load_last_candles(sym, LOOKBACK)
+        if data is None:
+            continue
+        live_price   = live_prices.get(sym)
+        funding_rate = funding_map.get(sym.upper())
+        result = compute_opportunity(data, live_price=live_price, funding_rate=funding_rate)
+        if result:
+            results.append(result)
+    results.sort(key=lambda r: r['score'], reverse=True)
+    return results
+
+
 async def run_scan(symbols, min_score, dry_run, chat_ids, verbose=True, notify_empty=False):
     if verbose:
         t = datetime.now(timezone.utc).replace(tzinfo=None).strftime('%Y-%m-%d %H:%M UTC')

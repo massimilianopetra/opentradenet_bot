@@ -1168,19 +1168,17 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── daemon ───────────────────────────────────────────────────────────────
     if mode == 'daemon':
-        scan_mode  = 'vsa'
-        min_score  = monitor.scanner_min_score
-        recipients = list(monitor.spike_subscribers | monitor.tracking_enabled) or [chat_id]
+        scan_mode = 'vsa'
+        min_score = monitor.scanner_min_score
         for arg in args[1:]:
             al = arg.lower()
             if al in ('vsa', 'volume', 'pattern'):
                 scan_mode = al
             elif arg.isdigit():
                 min_score = int(arg)
-        monitor.scanner_enabled   = True
-        monitor.scanner_mode      = scan_mode
-        monitor.scanner_min_score = min_score
-        monitor.scanner_chat_ids  = set(recipients)
+        # registra SOLO questo utente nel daemon
+        monitor.scanner_subscribers[chat_id] = {'mode': scan_mode, 'min_score': min_score}
+        monitor.scanner_enabled = True
         score_str = f" (soglia {min_score})" if min_score != 60 else ""
         if scan_mode == 'volume':
             mode_label = "📊 Volume spike"
@@ -1191,8 +1189,7 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"🤖 *Scanner daemon attivato* — {mode_label}{score_str}\n"
             f"Check automatico dopo ogni chiusura candela 15m.\n"
-            f"Alert inviati a {len(recipients)} utente/i.\n"
-            f"Usa /scanstop per fermare.",
+            f"Usa /scanstop per disattivare.",
             parse_mode='Markdown'
         )
         return
@@ -1272,12 +1269,13 @@ async def scanstop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Non autorizzato.")
         return
 
-    if monitor.scanner_enabled:
-        monitor.scanner_enabled = False
-        monitor.scanner_chat_ids.clear()
+    if chat_id in monitor.scanner_subscribers:
+        monitor.scanner_subscribers.pop(chat_id)
+        if not monitor.scanner_subscribers:
+            monitor.scanner_enabled = False
         await update.message.reply_text("⏸ *Scanner daemon fermato.*", parse_mode='Markdown')
     else:
-        await update.message.reply_text("ℹ️ Scanner daemon non era attivo.")
+        await update.message.reply_text("ℹ️ Scanner daemon non era attivo per te.")
 
 
 async def scanstatus_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
