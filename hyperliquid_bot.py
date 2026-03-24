@@ -1961,6 +1961,28 @@ async def _prepare_order(update, chat_id, symbol, usd, is_buy):
         'expires_at': expires_at,
     }
 
+    # Fetch spread — silenzioso in caso di errore, non blocca l'ordine
+    spread_line = ''
+    try:
+        _spread_client = HyperliquidClient('0x0000000000000000000000000000000000000000')
+        _spread_result = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: _spread_client.get_spread(symbol)
+        )
+        if _spread_result.get('found'):
+            _sp_pct = _spread_result['spread_pct']
+            if _sp_pct < 0.10:
+                _sp_emoji, _sp_label = '✅', 'basso'
+            elif _sp_pct < 0.30:
+                _sp_emoji, _sp_label = '⚠️', 'medio'
+            else:
+                _sp_emoji, _sp_label = '🚨', 'alto'
+            spread_line = (
+                f"Spread: ${_fmt(_spread_result['spread_abs'])}"
+                f"  ({_sp_pct:.2f}%)  {_sp_emoji} {_sp_label}\n"
+            )
+    except Exception:
+        pass
+
     keyboard = InlineKeyboardMarkup([[
         InlineKeyboardButton("✅ Conferma", callback_data="order_confirm"),
         InlineKeyboardButton("🚫 Annulla",  callback_data="order_cancel"),
@@ -1970,6 +1992,7 @@ async def _prepare_order(update, chat_id, symbol, usd, is_buy):
         f"{direction} *{symbol}* {market_s}\n"
         f"Importo: ${usd:,.2f}\n"
         f"Prezzo attuale: ${_fmt(price)}\n"
+        f"{spread_line}"
         f"Size stimata: {size:.4f}\n"
         f"⏰ Scade in 30 secondi",
         parse_mode='Markdown',
