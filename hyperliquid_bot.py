@@ -733,11 +733,10 @@ async def chart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # Candela live: prova a ottenere OHLC reali dall'API (timeout 3s)
-        # Fallback 1: prezzo sintetico da cache  Fallback 2: nessuna candela live
-        _live_ohlc = await fetch_live_candle(symbol, is_xyz=False)
-        if _live_ohlc is None:
-            _live_ohlc = await fetch_live_candle(symbol, is_xyz=True)
+        # Determina dex del simbolo (stessa logica di long/short/close)
+        _dex = await _detect_dex(symbol)
+        # Candela live: OHLC reali dall'API, fallback sintetico da cache
+        _live_ohlc = await fetch_live_candle(symbol, is_xyz=(_dex == 'xyz'))
         if _live_ohlc is not None:
             data = cc.append_live_candle(data, _live_ohlc)
         elif monitor.last_prices.get(symbol):
