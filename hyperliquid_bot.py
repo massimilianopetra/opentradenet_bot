@@ -148,6 +148,21 @@ wallet_store = WalletStore(DATA_DIR, _enc_key)
 _CHART_PREFS_FILE: Path = DATA_DIR / 'chart_prefs' / 'trendlines.json'
 _chart_trendlines: dict = {}   # chat_id (int) → bool
 
+# ---------------------------------------------------------------------------
+# Symbols info database
+# ---------------------------------------------------------------------------
+# SYMBOLS_INFO=data/symbols_info.json
+_SYMBOLS_INFO_PATH = Path(__file__).parent / Path(os.getenv('SYMBOLS_INFO', 'data/symbols_info.json'))
+_symbols_info: dict = {}
+try:
+    with open(_SYMBOLS_INFO_PATH, 'r', encoding='utf-8') as _f:
+        _symbols_info = json.load(_f)
+    logger.info(f"symbols_info caricato: {len(_symbols_info)} simboli da {_SYMBOLS_INFO_PATH}")
+except FileNotFoundError:
+    logger.info(f"symbols_info: file non trovato ({_SYMBOLS_INFO_PATH}), database vuoto")
+except Exception as _e:
+    logger.warning(f"symbols_info: errore caricamento ({_SYMBOLS_INFO_PATH}): {_e}")
+
 
 # ---------------------------------------------------------------------------
 # Monitor
@@ -3097,6 +3112,79 @@ async def message_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def post_shutdown(application: Application):
     await monitor.close_session()
 
+
+async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text(
+            "ℹ️ <b>Uso:</b> /info SIMBOLO\n\n"
+            "Mostra informazioni dettagliate su un simbolo dal database.\n\n"
+            "Esempi:\n"
+            "  /info HYUNDAI\n"
+            "  /info CL  (alias di WTIOIL)",
+            parse_mode='HTML'
+        )
+        return
+
+    query = context.args[0].upper()
+
+    # Cerca prima per chiave diretta
+    info = _symbols_info.get(query)
+    found_sym = query
+
+    # Se non trovato, cerca negli aliases di tutti i simboli
+    if info is None:
+        for sym, data in _symbols_info.items():
+            aliases = data.get('aliases', [])
+            if isinstance(aliases, list) and query in [a.upper() for a in aliases]:
+                info = data
+                found_sym = sym
+                break
+
+    if info is None:
+        await update.message.reply_text(
+            f"❌ <b>{query}</b> non trovato nel database.\n\n"
+            "Controlla il nome del simbolo o prova con un alias diverso.",
+            parse_mode='HTML'
+        )
+        return
+
+    description     = info.get('description', '')
+    underlying      = info.get('underlying', '')
+    market          = info.get('market', '')
+    exchange        = info.get('exchange', '')
+    currency        = info.get('currency', '')
+    max_leverage    = info.get('max_leverage', '')
+    discovery_bound = info.get('discovery_bound', '')
+    margin_mode     = info.get('margin_mode', '')
+    oi_cap          = info.get('oi_cap', '')
+    session_ext     = info.get('session_external_utc', '')
+    session_int     = info.get('session_internal_utc', '')
+    notes           = info.get('notes', '')
+    aliases         = info.get('aliases', [])
+
+    lines = [f"🔍 <b>{found_sym}</b> — <i>{description}</i>"]
+
+    if aliases:
+        lines.append(f"🔁 Alias: {', '.join(aliases)}")
+
+    lines.append("")
+    lines.append(f"📌 Underlying: {underlying}")
+    lines.append(f"🏦 Mercato: {exchange} ({market})")
+    lines.append(f"💱 Valuta: {currency}")
+    lines.append(f"⚡ Leva max: {max_leverage}x  |  Bound: ±{discovery_bound}%")
+    lines.append(f"🛡 Margine: {margin_mode}")
+    lines.append(f"💰 OI Cap: {oi_cap}")
+    lines.append("")
+    lines.append(f"🕐 Sessione esterna: {session_ext}")
+    lines.append(f"🕐 Sessione interna: {session_int}")
+
+    if notes:
+        lines.append("")
+        lines.append(f"📝 <i>{notes}</i>")
+
+    await update.message.reply_text("\n".join(lines), parse_mode='HTML')
+
+
 def main():
     logger.info("=" * 60)
     logger.info("Avvio Hyperliquid Price Monitor Bot")
@@ -3141,6 +3229,7 @@ def main():
     app.add_handler(CommandHandler("scanstatus",   scanstatus_command))
     app.add_handler(CommandHandler("cancelsl", cancelsl_command))
     app.add_handler(CommandHandler("message",  message_command))
+    app.add_handler(CommandHandler("info",     info_command))
 
     app.post_init     = post_init
     app.post_shutdown = post_shutdown
