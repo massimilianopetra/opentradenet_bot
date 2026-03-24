@@ -733,10 +733,15 @@ async def chart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # Candela live parziale — usa il prezzo in cache, zero chiamate API extra
-        _live_px = monitor.last_prices.get(symbol)
-        if _live_px:
-            data = cc.append_live_candle(data, float(_live_px))
+        # Candela live: prova a ottenere OHLC reali dall'API (timeout 3s)
+        # Fallback 1: prezzo sintetico da cache  Fallback 2: nessuna candela live
+        _live_ohlc = await fetch_live_candle(symbol, is_xyz=False)
+        if _live_ohlc is None:
+            _live_ohlc = await fetch_live_candle(symbol, is_xyz=True)
+        if _live_ohlc is not None:
+            data = cc.append_live_candle(data, _live_ohlc)
+        elif monitor.last_prices.get(symbol):
+            data = cc.append_live_candle(data, float(monitor.last_prices[symbol]))
 
         fig = cc.plot_chart(data, symbol, timeframe,
                             show_trendlines=_chart_trendlines.get(update.effective_chat.id, False))
@@ -1878,6 +1883,60 @@ async def _detect_dex(symbol: str) -> str:
     except Exception:
         return ''
 
+async def fetch_live_candle(symbol: str, is_xyz: bool = False) -> dict | None:
+    """
+    Recupera la candela 15m corrente (in formazione) da Hyperliquid via
+    l'endpoint candleSnapshot. Timeout 3 secondi.
+
+    Args:
+        symbol:  simbolo in maiuscolo (es. 'BTC', 'HYUNDAI')
+        is_xyz:  True se il simbolo è su DEX xyz → aggiunge "dex": "xyz"
+
+    Returns:
+        dict con chiavi open, high, low, close, volume, timestamp (ms)
+        oppure None se la chiamata fallisce per qualsiasi motivo.
+    """
+    try:
+        now_ms   = int(datetime.now().timestamp() * 1000)
+        # Inizio della candela 15m corrente (arrotondamento al quarto d'ora inferiore)
+        start_ms = now_ms - (now_ms % (15 * 60 * 1000))
+
+        payload: dict = {
+            'type': 'candleSnapshot',
+            'req':  {
+                'coin':      symbol,
+                'interval':  '15m',
+                'startTime': start_ms,
+                'endTime':   now_ms,
+            },
+        }
+        if is_xyz:
+            payload['dex'] = 'xyz'
+
+        async with aiohttp.ClientSession() as sess:
+            async with sess.post(
+                HYPERLIQUID_API,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=3),
+            ) as r:
+                raw = await r.json()
+
+        if not raw or not isinstance(raw, list):
+            return None
+        c = raw[-1]
+        return {
+            'open':      float(c['o']),
+            'high':      float(c['h']),
+            'low':       float(c['l']),
+            'close':     float(c['c']),
+            'volume':    float(c['v']),
+            'timestamp': int(c['t']),
+        }
+    except Exception as _e:
+        logger.debug(f"fetch_live_candle {symbol} is_xyz={is_xyz}: {_e}")
+        return None
+
+
 def _fmt(x):
     if x == 0: return "0"
     if x >= 1000: return f"{x:,.2f}"
@@ -2009,8 +2068,12 @@ async def _prepare_order(update, chat_id, symbol, usd, is_buy):
             _chart_data = await asyncio.get_event_loop().run_in_executor(
                 None, lambda: cc.load_csv(_csv_path, 80, '15m')
             )
-            # Candela live: usa il prezzo già recuperato per la conferma (zero API extra)
-            _chart_data = cc.append_live_candle(_chart_data, float(price))
+            # Candela live: OHLC reali dall'API; fallback sintetico dal prezzo già noto
+            _live_ohlc = await fetch_live_candle(symbol, is_xyz=(dex == 'xyz'))
+            if _live_ohlc is not None:
+                _chart_data = cc.append_live_candle(_chart_data, _live_ohlc)
+            else:
+                _chart_data = cc.append_live_candle(_chart_data, float(price))
             _fig = await asyncio.get_event_loop().run_in_executor(
                 None, lambda: cc.plot_chart(_chart_data, symbol, '15m',
                                             show_trendlines=_chart_trendlines.get(chat_id, False))

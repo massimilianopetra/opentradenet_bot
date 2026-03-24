@@ -483,44 +483,66 @@ def _x_labels(timestamps: list, tf: str, max_labels: int = 8) -> tuple:
 # Candela live parziale
 # ---------------------------------------------------------------------------
 
-def append_live_candle(data: dict, live_price: float) -> dict:
+def append_live_candle(data: dict, live_candle) -> dict:
     """
-    Aggiunge una candela parziale sintetica in coda al dizionario data
-    senza modificare i dati originali (non-distruttiva).
+    Aggiunge una candela parziale in coda al dizionario data senza modificare
+    i dati originali (non-distruttiva).
 
-    Costruzione della candela:
-      open      = close dell'ultima candela esistente
-      high      = max(open, live_price)
-      low       = min(open, live_price)
-      close     = live_price
-      volume    = 0
-      timestamp = timestamp ultima candela + 15 minuti
+    Args:
+        data:        output di load_csv()
+        live_candle: float → candela sintetica fallback:
+                         open = close[-1], high/low da live_price, volume = 0
+                     dict  → candela OHLC reale da API, con chiavi:
+                         open, high, low, close, volume, timestamp
+                         (timestamp in ms int oppure stringa ISO)
 
     Returns:
         Nuovo dict con le stesse chiavi di load_csv() più live_candle=True.
     """
-    last_close = float(data['closes'][-1])
-    live_open  = last_close
-    live_high  = max(live_open, live_price)
-    live_low   = min(live_open, live_price)
-
+    # Calcola il timestamp di default (ultima candela + 15 min) per il fallback
     last_ts = data['timestamps'][-1]
     try:
-        dt = datetime.strptime(last_ts, '%Y-%m-%d %H:%M:%S')
+        _dt = datetime.strptime(last_ts, '%Y-%m-%d %H:%M:%S')
     except ValueError:
         try:
-            dt = datetime.strptime(last_ts, '%Y-%m-%d')
+            _dt = datetime.strptime(last_ts, '%Y-%m-%d')
         except ValueError:
-            dt = datetime.now()
-    live_ts = (dt + timedelta(minutes=15)).strftime('%Y-%m-%d %H:%M:%S')
+            _dt = datetime.now()
+    default_ts = (_dt + timedelta(minutes=15)).strftime('%Y-%m-%d %H:%M:%S')
+
+    if isinstance(live_candle, dict):
+        # Dati OHLC reali dall'API
+        live_open   = float(live_candle['open'])
+        live_high   = float(live_candle['high'])
+        live_low    = float(live_candle['low'])
+        live_close  = float(live_candle['close'])
+        live_volume = float(live_candle.get('volume', 0.0))
+        ts_raw = live_candle.get('timestamp')
+        if isinstance(ts_raw, (int, float)):
+            # Timestamp in millisecondi → stringa ISO
+            live_ts = datetime.utcfromtimestamp(ts_raw / 1000).strftime('%Y-%m-%d %H:%M:%S')
+        elif isinstance(ts_raw, str):
+            live_ts = ts_raw
+        else:
+            live_ts = default_ts
+    else:
+        # Fallback sintetico: solo il prezzo last è noto
+        live_price  = float(live_candle)
+        last_close  = float(data['closes'][-1])
+        live_open   = last_close
+        live_high   = max(live_open, live_price)
+        live_low    = min(live_open, live_price)
+        live_close  = live_price
+        live_volume = 0.0
+        live_ts     = default_ts
 
     return {
         'timestamps':  list(data['timestamps']) + [live_ts],
         'opens':       np.append(data['opens'],   live_open),
         'highs':       np.append(data['highs'],   live_high),
         'lows':        np.append(data['lows'],    live_low),
-        'closes':      np.append(data['closes'],  live_price),
-        'volumes':     np.append(data['volumes'], 0.0),
+        'closes':      np.append(data['closes'],  live_close),
+        'volumes':     np.append(data['volumes'], live_volume),
         'live_candle': True,
     }
 
