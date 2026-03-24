@@ -735,12 +735,19 @@ async def chart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Determina dex del simbolo (stessa logica di long/short/close)
         _dex = await _detect_dex(symbol)
-        # Candela live: OHLC reali dall'API, fallback sintetico da cache
+        # Candela live: OHLC reali dall'API (solo perp), fallback su cache o get_price
         _live_ohlc = await fetch_live_candle(symbol, is_xyz=(_dex == 'xyz'))
         if _live_ohlc is not None:
             data = cc.append_live_candle(data, _live_ohlc)
-        elif monitor.last_prices.get(symbol):
-            data = cc.append_live_candle(data, float(monitor.last_prices[symbol]))
+        else:
+            _fallback = monitor.last_prices.get(symbol)
+            if not _fallback:
+                try:
+                    _fallback = await monitor.get_price(symbol)
+                except Exception:
+                    pass
+            if _fallback:
+                data = cc.append_live_candle(data, float(_fallback))
 
         fig = cc.plot_chart(data, symbol, timeframe,
                             show_trendlines=_chart_trendlines.get(update.effective_chat.id, False))
@@ -1896,40 +1903,34 @@ async def fetch_live_candle(symbol: str, is_xyz: bool = False) -> dict | None:
         oppure None se la chiamata fallisce per qualsiasi motivo.
     """
     try:
-        now_ms   = int(datetime.now().timestamp() * 1000)
-        # Inizio della candela 15m corrente (arrotondamento al quarto d'ora inferiore)
-        start_ms = now_ms - (now_ms % (15 * 60 * 1000))
-
-        coin = f"xyz:{symbol}" if is_xyz else symbol
-        payload: dict = {
-            'type': 'candleSnapshot',
-            'req':  {
-                'coin':      coin,
-                'interval':  '15m',
-                'startTime': start_ms,
-                'endTime':   now_ms,
-            },
-        }
+        # XYZ: candleSnapshot non supportato dall'API Hyperliquid.
+        # Il chiamante usera' il fallback su monitor.last_prices.
         if is_xyz:
-            payload['dex'] = 'xyz'
+            return None
 
-        logger.info(f"[LIVE_CANDLE] symbol={symbol} coin={coin} is_xyz={is_xyz} payload={payload}")
+        now_ms   = int(datetime.now().timestamp() * 1000)
+        start_ms = now_ms - (now_ms % (15 * 60 * 1000))
 
         async with aiohttp.ClientSession() as sess:
             async with sess.post(
                 HYPERLIQUID_API,
-                json=payload,
+                json={
+                    'type': 'candleSnapshot',
+                    'req':  {
+                        'coin':      symbol,
+                        'interval':  '15m',
+                        'startTime': start_ms,
+                        'endTime':   now_ms,
+                    },
+                },
                 timeout=aiohttp.ClientTimeout(total=3),
             ) as r:
                 raw = await r.json()
 
-        logger.info(f"[LIVE_CANDLE] raw risposta={raw}")
-
         if not raw or not isinstance(raw, list):
-            logger.info(f"[LIVE_CANDLE] risposta vuota o non lista — ritorno None")
             return None
         c = raw[-1]
-        result = {
+        return {
             'open':      float(c['o']),
             'high':      float(c['h']),
             'low':       float(c['l']),
@@ -1937,10 +1938,8 @@ async def fetch_live_candle(symbol: str, is_xyz: bool = False) -> dict | None:
             'volume':    float(c['v']),
             'timestamp': int(c['t']),
         }
-        logger.info(f"[LIVE_CANDLE] OK → {result}")
-        return result
     except Exception as _e:
-        logger.info(f"[LIVE_CANDLE] ECCEZIONE symbol={symbol} is_xyz={is_xyz}: {_e}")
+        logger.debug(f"fetch_live_candle {symbol} is_xyz={is_xyz}: {_e}")
         return None
 
 
