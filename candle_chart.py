@@ -480,6 +480,52 @@ def _x_labels(timestamps: list, tf: str, max_labels: int = 8) -> tuple:
     return pos, labels
 
 # ---------------------------------------------------------------------------
+# Candela live parziale
+# ---------------------------------------------------------------------------
+
+def append_live_candle(data: dict, live_price: float) -> dict:
+    """
+    Aggiunge una candela parziale sintetica in coda al dizionario data
+    senza modificare i dati originali (non-distruttiva).
+
+    Costruzione della candela:
+      open      = close dell'ultima candela esistente
+      high      = max(open, live_price)
+      low       = min(open, live_price)
+      close     = live_price
+      volume    = 0
+      timestamp = timestamp ultima candela + 15 minuti
+
+    Returns:
+        Nuovo dict con le stesse chiavi di load_csv() più live_candle=True.
+    """
+    last_close = float(data['closes'][-1])
+    live_open  = last_close
+    live_high  = max(live_open, live_price)
+    live_low   = min(live_open, live_price)
+
+    last_ts = data['timestamps'][-1]
+    try:
+        dt = datetime.strptime(last_ts, '%Y-%m-%d %H:%M:%S')
+    except ValueError:
+        try:
+            dt = datetime.strptime(last_ts, '%Y-%m-%d')
+        except ValueError:
+            dt = datetime.now()
+    live_ts = (dt + timedelta(minutes=15)).strftime('%Y-%m-%d %H:%M:%S')
+
+    return {
+        'timestamps':  list(data['timestamps']) + [live_ts],
+        'opens':       np.append(data['opens'],   live_open),
+        'highs':       np.append(data['highs'],   live_high),
+        'lows':        np.append(data['lows'],    live_low),
+        'closes':      np.append(data['closes'],  live_price),
+        'volumes':     np.append(data['volumes'], 0.0),
+        'live_candle': True,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Plot principale
 # ---------------------------------------------------------------------------
 
@@ -634,8 +680,9 @@ def plot_chart(data: dict, symbol: str, timeframe: str = '15m',
         ax.yaxis.label.set_color('#8b949e')
 
     # ── Pannello 1: Candlestick + BB + EMA + S&R ────────────────────────
-    w_body  = 0.6
-    w_wick  = 0.8
+    w_body   = 0.6
+    w_wick   = 0.8
+    is_live  = data.get('live_candle', False)   # ultima candela è sintetica?
 
     for i in x:
         bull = closes[i] >= opens[i]
@@ -643,9 +690,16 @@ def plot_chart(data: dict, symbol: str, timeframe: str = '15m',
         lo_b = min(opens[i], closes[i])
         hi_b = max(opens[i], closes[i])
         body_h = max(hi_b - lo_b, (highs[i] - lows[i]) * 0.002)
-        ax1.bar(i, body_h,   bottom=lo_b,   width=w_body,  color=col,    zorder=3)
+        # Wick — sempre disegnato in modo normale
         ax1.bar(i, highs[i] - lows[i], bottom=lows[i], width=w_wick * 0.12,
                 color=col, zorder=2)
+        # Corpo — candela live: semi-trasparente con bordo tratteggiato
+        if is_live and i == n - 1:
+            ax1.bar(i, body_h, bottom=lo_b, width=w_body,
+                    color=col, alpha=0.45, edgecolor=col,
+                    linewidth=1.5, linestyle='--', zorder=3)
+        else:
+            ax1.bar(i, body_h, bottom=lo_b, width=w_body, color=col, zorder=3)
 
     # Bollinger Bands
     valid_bb = ~np.isnan(bb_up)
@@ -702,9 +756,10 @@ def plot_chart(data: dict, symbol: str, timeframe: str = '15m',
     pct_chg    = ((closes[-1] - closes[0]) / closes[0] * 100) if closes[0] != 0 else 0
     sign       = '+' if pct_chg >= 0 else ''
     tf_label   = TIMEFRAMES[timeframe]['label']
+    live_note  = '  · live' if is_live else ''
     ax1.set_title(
         f"{symbol}  ·  {tf_label}  ·  {n} candele  ·  "
-        f"Ultimo: {last_close:.4g}  ({sign}{pct_chg:.2f}%)",
+        f"Ultimo: {last_close:.4g}  ({sign}{pct_chg:.2f}%){live_note}",
         color='#e6edf3', fontsize=11, pad=8, loc='left'
     )
 

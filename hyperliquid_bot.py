@@ -726,6 +726,11 @@ async def chart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+        # Candela live parziale — usa il prezzo in cache, zero chiamate API extra
+        _live_px = monitor.last_prices.get(symbol)
+        if _live_px:
+            data = cc.append_live_candle(data, float(_live_px))
+
         fig = cc.plot_chart(data, symbol, timeframe)
 
         with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
@@ -1996,6 +2001,8 @@ async def _prepare_order(update, chat_id, symbol, usd, is_buy):
             _chart_data = await asyncio.get_event_loop().run_in_executor(
                 None, lambda: cc.load_csv(_csv_path, 80, '15m')
             )
+            # Candela live: usa il prezzo già recuperato per la conferma (zero API extra)
+            _chart_data = cc.append_live_candle(_chart_data, float(price))
             _fig = await asyncio.get_event_loop().run_in_executor(
                 None, lambda: cc.plot_chart(_chart_data, symbol, '15m')
             )
