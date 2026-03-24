@@ -1900,10 +1900,11 @@ async def fetch_live_candle(symbol: str, is_xyz: bool = False) -> dict | None:
         # Inizio della candela 15m corrente (arrotondamento al quarto d'ora inferiore)
         start_ms = now_ms - (now_ms % (15 * 60 * 1000))
 
+        coin = f"xyz:{symbol}" if is_xyz else symbol
         payload: dict = {
             'type': 'candleSnapshot',
             'req':  {
-                'coin':      symbol,
+                'coin':      coin,
                 'interval':  '15m',
                 'startTime': start_ms,
                 'endTime':   now_ms,
