@@ -1913,6 +1913,8 @@ async def fetch_live_candle(symbol: str, is_xyz: bool = False) -> dict | None:
         if is_xyz:
             payload['dex'] = 'xyz'
 
+        logger.info(f"[LIVE_CANDLE] symbol={symbol} coin={coin} is_xyz={is_xyz} payload={payload}")
+
         async with aiohttp.ClientSession() as sess:
             async with sess.post(
                 HYPERLIQUID_API,
@@ -1921,10 +1923,13 @@ async def fetch_live_candle(symbol: str, is_xyz: bool = False) -> dict | None:
             ) as r:
                 raw = await r.json()
 
+        logger.info(f"[LIVE_CANDLE] raw risposta={raw}")
+
         if not raw or not isinstance(raw, list):
+            logger.info(f"[LIVE_CANDLE] risposta vuota o non lista — ritorno None")
             return None
         c = raw[-1]
-        return {
+        result = {
             'open':      float(c['o']),
             'high':      float(c['h']),
             'low':       float(c['l']),
@@ -1932,8 +1937,10 @@ async def fetch_live_candle(symbol: str, is_xyz: bool = False) -> dict | None:
             'volume':    float(c['v']),
             'timestamp': int(c['t']),
         }
+        logger.info(f"[LIVE_CANDLE] OK → {result}")
+        return result
     except Exception as _e:
-        logger.debug(f"fetch_live_candle {symbol} is_xyz={is_xyz}: {_e}")
+        logger.info(f"[LIVE_CANDLE] ECCEZIONE symbol={symbol} is_xyz={is_xyz}: {_e}")
         return None
 
 
