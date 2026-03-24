@@ -743,7 +743,9 @@ async def chart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             _fallback = monitor.last_prices.get(symbol)
             if not _fallback:
                 try:
-                    _fallback = await monitor.get_price(symbol)
+                    _gp = await monitor.get_price(symbol)
+                    if _gp:
+                        _fallback = _gp[0]
                 except Exception:
                     pass
             if _fallback:
