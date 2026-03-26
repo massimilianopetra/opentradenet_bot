@@ -248,6 +248,50 @@ def _generate_charts(symbol: str, candles_dir: Path) -> list:
 
 
 # ---------------------------------------------------------------------------
+# Dryrun: chart + mega_summary locale, senza chiamata Claude API
+# ---------------------------------------------------------------------------
+
+async def analyze_symbol_dryrun(symbol: str, candles_dir) -> tuple:
+    """
+    Genera i due chart PNG e il mega_summary testuale locale.
+    NON chiama la Claude Vision API.
+
+    Returns:
+        (summary_text: str, chart_paths: list[str])
+    """
+    import mega_summary as _ms
+
+    chart_paths = _generate_charts(symbol, Path(candles_dir))
+    if not chart_paths:
+        return f"❌ Nessun dato disponibile per {symbol}", []
+
+    sym = symbol.upper()
+    csv_15m_path = Path(candles_dir) / sym / f"{sym}_15m.csv"
+
+    # Ricostruisce il CSV daily temporaneo (stessa logica di _generate_charts)
+    all_15m = _load_candles_csv(csv_15m_path) if csv_15m_path.exists() else []
+    current_price = all_15m[-1]['close'] if all_15m else 0.0
+
+    # Scrivi CSV daily temporaneo per mega_summary
+    daily_candles = _resample_to_daily(all_15m)
+    tmp_1d = _write_temp_csv(daily_candles)
+    try:
+        summary_text = _ms.compute_mega_summary(
+            symbol       = sym,
+            csv_15m_path = str(csv_15m_path),
+            csv_1d_path  = str(tmp_1d),
+            current_price= current_price,
+        )
+    except Exception as e:
+        logger.error(f"analyze_symbol_dryrun mega_summary {sym}: {e}")
+        summary_text = f"❌ Errore generazione summary: {e}"
+    finally:
+        tmp_1d.unlink(missing_ok=True)
+
+    return summary_text, chart_paths
+
+
+# ---------------------------------------------------------------------------
 # Cleanup helper
 # ---------------------------------------------------------------------------
 
