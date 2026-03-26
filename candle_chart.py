@@ -820,8 +820,17 @@ def plot_chart(data: dict, symbol: str, timeframe: str = '15m',
     # ── Pannello 4: MACD ─────────────────────────────────────────────────
     macd_valid = ~np.isnan(macd_h)
     if macd_valid.any():
-        hist_colors = ['#26a641' if v >= 0 else '#f85149' for v in macd_h[macd_valid]]
-        ax4.bar(x[macd_valid], macd_h[macd_valid], color=hist_colors, alpha=0.7, zorder=2)
+        mv = macd_h[macd_valid]
+        hist_colors = []
+        for i, v in enumerate(mv):
+            prev = mv[i - 1] if i > 0 else v
+            if v >= 0:
+                # verde pieno = cresce, verde chiaro = indebolisce
+                hist_colors.append('#26a641' if v >= prev else '#74c99a')
+            else:
+                # rosso pieno = cala ulteriormente, rosso chiaro = si riduce
+                hist_colors.append('#f85149' if v <= prev else '#f4a59a')
+        ax4.bar(x[macd_valid], mv, color=hist_colors, alpha=0.85, zorder=2)
     ml_valid = ~np.isnan(macd_l)
     ms_valid = ~np.isnan(macd_s)
     if ml_valid.any():
