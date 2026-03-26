@@ -3029,7 +3029,11 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     symbol  = context.args[0].upper()
-    dryrun  = '--dryrun' in [a.lower() for a in context.args]
+    logger.info(f"analyze_command args raw: {context.args!r}")
+    # Gestisce anche em-dash (—dryrun) prodotto dall'autocorrettore Telegram
+    _args_norm = [a.lower().lstrip('\u2014-') for a in context.args]
+    dryrun  = ('--dryrun' in [a.lower() for a in context.args] or
+               'dryrun' in _args_norm)
 
     if not dryrun and not ANTHROPIC_API_KEY:
         await update.message.reply_text("❌ ANTHROPIC_API_KEY non configurata nel .env")
