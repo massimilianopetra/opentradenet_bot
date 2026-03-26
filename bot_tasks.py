@@ -128,7 +128,30 @@ async def price_polling_task(application) -> None:
 
                     monitor.last_prices[sym] = price_val
 
-                now = datetime.now().strftime('%H:%M:%S')
+                # ── Aggiorna candela 15m in-memory ──────────────────────────────
+                now      = datetime.now()
+                slot_dt  = now.replace(minute=(now.minute // 15) * 15, second=0, microsecond=0)
+                slot_str = slot_dt.strftime('%Y-%m-%d %H:%M')
+
+                for symbol, price_info in all_prices.items():
+                    px = price_info[0] if isinstance(price_info, (list, tuple)) else price_info
+                    if not isinstance(px, (int, float)) or px <= 0:
+                        continue
+                    existing = monitor.live_candle_ohlc.get(symbol)
+                    if existing is None or existing['slot'] != slot_str:
+                        monitor.live_candle_ohlc[symbol] = {
+                            'slot':  slot_str,
+                            'open':  px,
+                            'high':  px,
+                            'low':   px,
+                            'close': px,
+                        }
+                    else:
+                        existing['high']  = max(existing['high'], px)
+                        existing['low']   = min(existing['low'],  px)
+                        existing['close'] = px
+
+                now = now.strftime('%H:%M:%S')
                 for chat_id, lines in subscribe_alerts.items():
                     threshold = monitor.get_threshold(chat_id)
                     msg = (

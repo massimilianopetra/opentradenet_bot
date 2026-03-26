@@ -69,6 +69,10 @@ class HyperliquidPriceMonitor:
         self.subscribers:            Dict[int, Set[str]] = {}
         # Cache prezzi ultimo poll
         self.last_prices:            Dict[str, float]    = {}
+        # Candela 15m in formazione: {symbol: {'open', 'high', 'low', 'close', 'slot'}}
+        # 'slot' = timestamp del quarto d'ora corrente (es. "2026-03-26 14:15")
+        # Resettato automaticamente al cambio di slot dal price_polling_task
+        self.live_candle_ohlc: dict = {}
         # Prezzo di riferimento per alert subscribe (aggiornato dopo ogni alert)
         self.alert_base_prices:      Dict[str, float]    = {}
         # Prezzo al primo subscribe (mai modificato)

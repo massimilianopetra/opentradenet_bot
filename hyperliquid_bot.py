@@ -1931,6 +1931,19 @@ async def fetch_live_candle(symbol: str, is_xyz: bool = False) -> dict | None:
         dict con chiavi open, high, low, close, volume, timestamp (ms)
         oppure None se la chiamata fallisce per qualsiasi motivo.
     """
+    # Prima controlla la cache in-memory accumulata dal price_polling_task
+    cached = monitor.live_candle_ohlc.get(symbol)
+    if cached:
+        return {
+            'open':      cached['open'],
+            'high':      cached['high'],
+            'low':       cached['low'],
+            'close':     cached['close'],
+            'volume':    0.0,
+            'timestamp': 0,
+        }
+
+    # Fallback: chiamata API diretta (solo perp, XYZ non supportato)
     try:
         # XYZ: candleSnapshot non supportato dall'API Hyperliquid.
         # Il chiamante usera' il fallback su monitor.last_prices.

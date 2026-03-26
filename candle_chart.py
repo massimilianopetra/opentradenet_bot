@@ -714,21 +714,19 @@ def plot_chart(data: dict, symbol: str, timeframe: str = '15m',
     is_live  = data.get('live_candle', False)   # ultima candela è sintetica?
 
     for i in x:
-        bull = closes[i] >= opens[i]
-        col  = '#26a641' if bull else '#f85149'
-        lo_b = min(opens[i], closes[i])
-        hi_b = max(opens[i], closes[i])
-        body_h = max(hi_b - lo_b, (highs[i] - lows[i]) * 0.002)
-        # Wick — sempre disegnato in modo normale
+        bull     = closes[i] >= opens[i]
+        col      = '#26a641' if bull else '#f85149'
+        lo_b     = min(opens[i], closes[i])
+        hi_b     = max(opens[i], closes[i])
+        body_h   = max(hi_b - lo_b, (highs[i] - lows[i]) * 0.002)
+        live_col = ('#74c99a' if bull else '#f4a59a') if (is_live and i == n - 1) else col
+
+        # Wick
         ax1.bar(i, highs[i] - lows[i], bottom=lows[i], width=w_wick * 0.12,
-                color=col, zorder=2)
-        # Corpo — candela live: semi-trasparente con bordo tratteggiato
-        if is_live and i == n - 1:
-            ax1.bar(i, body_h, bottom=lo_b, width=w_body,
-                    color=col, alpha=0.45, edgecolor=col,
-                    linewidth=1.5, linestyle='--', zorder=3)
-        else:
-            ax1.bar(i, body_h, bottom=lo_b, width=w_body, color=col, zorder=3)
+                color=live_col, zorder=2)
+        # Corpo
+        ax1.bar(i, body_h, bottom=lo_b, width=w_body,
+                color=live_col, alpha=0.85 if (is_live and i == n - 1) else 1.0, zorder=3)
 
     # Bollinger Bands
     valid_bb = ~np.isnan(bb_up)
