@@ -763,6 +763,16 @@ async def position_tracking_task(application) -> None:
 # Task 3 — Candele 15m + trigger scanner daemon
 # ---------------------------------------------------------------------------
 
+def _sleep_until_next_candle(offset_secs: int = 30) -> float:
+    """Calcola i secondi da attendere per il prossimo multiplo di 15m + offset."""
+    import time
+    now      = time.time()
+    interval = 15 * 60  # 900s
+    elapsed  = now % interval
+    wait     = (interval - elapsed) + offset_secs
+    return wait
+
+
 async def candle_task(application) -> None:
     """
     Ogni CANDLES_INTERVAL_SECS:
@@ -781,8 +791,10 @@ async def candle_task(application) -> None:
     fetch_candles_15m     = h['fetch_candles_15m']
     save_candles          = h['save_candles']
 
-    logger.info(f"🕯 Task candele avviato (intervallo: {CANDLES_INTERVAL_SECS}s)")
     CANDLES_DIR.mkdir(parents=True, exist_ok=True)
+    wait0 = _sleep_until_next_candle(offset_secs=30)
+    logger.info(f"🕯 Task candele avviato — prima esecuzione in {wait0:.0f}s (allineato a :00/:15/:30/:45 + 30s)")
+    await asyncio.sleep(wait0)
 
     while True:
         try:
@@ -892,4 +904,4 @@ async def candle_task(application) -> None:
         except Exception as e:
             logger.error(f"Errore nel candle task: {e}", exc_info=True)
 
-        await asyncio.sleep(CANDLES_INTERVAL_SECS)
+        await asyncio.sleep(_sleep_until_next_candle(offset_secs=30))
