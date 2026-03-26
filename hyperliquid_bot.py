@@ -3079,7 +3079,8 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 with open(path, 'rb') as f:
                     img_bytes = f.read()
-                caption = analysis_text if i == len(chart_paths) - 1 else None
+                # dryrun: testo troppo lungo per caption — grafici senza testo, poi testo separato
+                caption = (None if dryrun else (analysis_text if i == len(chart_paths) - 1 else None))
                 media.append(InputMediaPhoto(media=img_bytes, caption=caption))
             except Exception as e:
                 logger.error(f"Errore lettura chart {path}: {e}")
@@ -3088,7 +3089,14 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_media_group(media=media)
             except Exception as e:
                 logger.error(f"Errore invio media group: {e}")
-                await update.message.reply_text(analysis_text)
+                if not dryrun:
+                    await update.message.reply_text(analysis_text)
+            if dryrun:
+                # Testo come messaggio separato (troppo lungo per caption Telegram)
+                txt = analysis_text
+                while txt:
+                    await update.message.reply_text(txt[:4096])
+                    txt = txt[4096:]
         else:
             await update.message.reply_text(analysis_text)
         ml_analyst.cleanup_charts(chart_paths)
