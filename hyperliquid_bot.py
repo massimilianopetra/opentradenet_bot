@@ -862,9 +862,10 @@ async def fetch_candles_15m(symbol: str, dex: str = '') -> list:
     import aiohttp
     internal_name = f"{dex}:{symbol}" if dex else symbol
 
-    import time
-    now_ms   = int(time.time() * 1000)
-    start_ms = now_ms - 90 * 60 * 1000
+    import time as _time
+    now_ms       = int(_time.time() * 1000)
+    fetch_end_ms = now_ms - 5_000
+    start_ms     = now_ms - 120 * 60 * 1000  # 2h per sicurezza
 
     payload = {
         "type":       "candleSnapshot",
@@ -872,7 +873,7 @@ async def fetch_candles_15m(symbol: str, dex: str = '') -> list:
             "coin":       internal_name,
             "interval":   "15m",
             "startTime":  start_ms,
-            "endTime":    now_ms,
+            "endTime":    fetch_end_ms,
         }
     }
     if dex:
@@ -927,22 +928,36 @@ def save_candles(symbol: str, candles: list) -> int:
         except Exception:
             pass
 
-    written   = 0
-    new_rows  = []
+    # Le ultime 2 candele nel CSV potrebbero essere state salvate in formazione.
+    # Le aggiorniamo sempre se l'API ci restituisce dati più recenti.
+    overwrite_ts = set()
+    if existing_rows:
+        overwrite_ts.add(existing_rows[-1][0])
+    if len(existing_rows) >= 2:
+        overwrite_ts.add(existing_rows[-2][0])
+
+    written      = 0
+    updated_rows = {row[0]: row for row in existing_rows}  # ts -> row
+
     for c in candles:
         if c['timestamp'] not in existing_ts:
-            new_rows.append([
+            updated_rows[c['timestamp']] = [
                 c['timestamp'], c['open'], c['high'],
                 c['low'], c['close'], c['volume']
-            ])
+            ]
             existing_ts.add(c['timestamp'])
+            written += 1
+        elif c['timestamp'] in overwrite_ts:
+            updated_rows[c['timestamp']] = [
+                c['timestamp'], c['open'], c['high'],
+                c['low'], c['close'], c['volume']
+            ]
             written += 1
 
     if not written:
         return 0
 
-    all_rows = existing_rows + new_rows
-    all_rows.sort(key=lambda r: r[0])
+    all_rows = sorted(updated_rows.values(), key=lambda r: r[0])
     try:
         with open(csv_path, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
@@ -952,6 +967,11 @@ def save_candles(symbol: str, candles: list) -> int:
         logger.error(f"Errore scrittura candele {symbol}: {e}")
         return 0
 
+    logger.debug(
+        f"save_candles {symbol}: {written} righe scritte/aggiornate, "
+        f"overwrite_ts={overwrite_ts}, "
+        f"last_csv_ts={existing_rows[-1][0] if existing_rows else 'N/A'}"
+    )
     return written
 
 _SCAN_HELP = (

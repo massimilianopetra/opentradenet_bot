@@ -208,45 +208,43 @@ def fetch_candles(symbol: str, dex: str, start_dt: datetime, end_dt: datetime, a
 
 def write_candles(csv_path: Path, candles: list, existing_ts: set) -> int:
     """
-    Aggiunge al CSV le candele non ancora presenti.
-    Mantiene l'ordine cronologico.
-    Ritorna il numero di righe scritte.
+    Scrive le candele nel CSV.
+    Le righe il cui timestamp NON è in existing_ts vengono sovrascritte/aggiunte
+    (consente il re-fetch forzato tramite --since rimuovendo ts da existing_ts).
+    Mantiene l'ordine cronologico. Ritorna il numero di righe scritte/aggiornate.
     """
     if not candles:
         return 0
 
-    is_new  = not csv_path.exists()
-    written = 0
-
     csv_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Legge tutto il contenuto esistente per fare un merge ordinato
-    existing_rows = []
-    if not is_new:
+    # Legge le righe esistenti tenendo solo quelle ancora in existing_ts
+    # (quelle escluse da --since vengono scartate e riscritte con i dati API)
+    updated_rows: dict = {}
+    if csv_path.exists():
         try:
             with open(csv_path, 'r', encoding='utf-8') as f:
                 reader = csv.reader(f)
                 next(reader, None)  # skip header
-                existing_rows = list(reader)
+                for row in reader:
+                    if row and row[0] in existing_ts:
+                        updated_rows[row[0]] = row
         except Exception:
             pass
 
-    # Prepara le nuove righe
-    new_rows = []
+    written = 0
     for c in candles:
+        updated_rows[c['timestamp']] = [
+            c['timestamp'], c['open'], c['high'], c['low'], c['close'], c['volume']
+        ]
         if c['timestamp'] not in existing_ts:
-            new_rows.append([c['timestamp'], c['open'], c['high'], c['low'], c['close'], c['volume']])
             existing_ts.add(c['timestamp'])
-            written += 1
+        written += 1
 
-    if not new_rows:
+    if not written:
         return 0
 
-    # Merge e ordinamento cronologico
-    all_rows = existing_rows + new_rows
-    all_rows.sort(key=lambda r: r[0])
-
-    # Riscrive il file completo ordinato
+    all_rows = sorted(updated_rows.values(), key=lambda r: r[0])
     with open(csv_path, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         writer.writerow(['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -273,6 +271,9 @@ def main():
                         help='Mostra solo i buchi senza scrivere nulla')
     parser.add_argument('--pause',         type=float, default=0.5,
                         help='Pausa in secondi tra chiamate API (default: 0.5)')
+    parser.add_argument('--since',         type=str,   default=None,
+                        help='Riscrivi tutte le candele da questa data (YYYY-MM-DD). '
+                             'Forza il re-fetch sovrascrivendo i dati già presenti.')
     args = parser.parse_args()
 
     print(f"{'='*60}")
@@ -280,12 +281,22 @@ def main():
     print(f"{'='*60}")
     print(f"  Config:  {args.env_file}")
     print(f"  Storia:  {args.days} giorni")
+    print(f"  Since:   {args.since or '(non impostato)'}")
     print(f"  Dry-run: {'sì' if args.dry_run else 'no'}")
     print()
 
-    cfg     = load_config(args.env_file)
-    since   = datetime.utcnow() - timedelta(days=args.days)
-    until   = datetime.utcnow()
+    cfg   = load_config(args.env_file)
+    until = datetime.utcnow()
+
+    # --since sovrascrive --days per il punto di inizio
+    if args.since:
+        try:
+            since = datetime.strptime(args.since, '%Y-%m-%d')
+        except ValueError:
+            print(f"❌ Formato --since non valido: '{args.since}' (atteso YYYY-MM-DD)")
+            sys.exit(1)
+    else:
+        since = datetime.utcnow() - timedelta(days=args.days)
 
     # Ricava simboli
     print("📡 Recupero lista simboli...")
@@ -311,6 +322,13 @@ def main():
         csv_path = cfg['candles_dir'] / sym / f"{sym}_15m.csv"
 
         existing_ts = read_existing_timestamps(csv_path)
+
+        # --since: rimuovi da existing_ts i timestamp >= since
+        # così find_gaps li considera buchi e write_candles li sovrascrive
+        if args.since:
+            since_str   = since.strftime('%Y-%m-%d %H:%M:%S')
+            existing_ts = {ts for ts in existing_ts if ts < since_str}
+
         missing     = find_gaps(existing_ts, since, until)
 
         if not missing:
