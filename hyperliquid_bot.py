@@ -224,7 +224,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/cancelsl SYM              — cancella stop loss nativo\n"
         "/takeprofit SYM PX [sz|%]  — take profit con trailing stop\n"
         "/orders                    — ordini condizionali attivi (TP)\n"
-        "/cancelcond ID|all         — cancella ordine take profit\n"
+        "/cancelcond ID|SYM|all     — cancella ordine condizionale\n"
         "/chart SYM [N] [TF]       — grafico candele (es: /chart GOLD 72 1H)\n"
         "/analyze SYM              — analisi tecnica AI daily+15m con setup suggerito\n"
         "/scan                     — scanner (tutte le modalità)\n"
@@ -1645,7 +1645,8 @@ async def takeprofit_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 def _resolve_trigger(raw: str, ctype: str, is_long: bool,
-                     entry_px: float, size_contracts: float) -> tuple:
+                     entry_px: float, size_contracts: float,
+                     current_px: float | None = None) -> tuple:
     """
     Converte l'argomento trigger in prezzo assoluto.
 
@@ -1674,11 +1675,13 @@ def _resolve_trigger(raw: str, ctype: str, is_long: bool,
     # --- Percentuale sul prezzo di carico ---
     if raw.endswith('%'):
         pct_val = float(raw[:-1])
-        if pct_val <= 0:
-            raise ValueError("La percentuale deve essere positiva")
-        delta      = entry_px * pct_val / 100
-        trigger_px = round(entry_px + sign * delta, 8)
-        desc       = f"{pct_val}% su entry ${_fmt(entry_px)}"
+        if pct_val < 0:
+            raise ValueError("La percentuale deve essere non negativa")
+        base_px    = current_px if current_px is not None else entry_px
+        delta      = base_px * pct_val / 100
+        trigger_px = round(base_px + sign * delta, 8)
+        base_label = f"prezzo attuale ${_fmt(base_px)}" if current_px is not None else f"entry ${_fmt(entry_px)}"
+        desc       = f"{pct_val}% su {base_label}"
         return trigger_px, desc
 
     # --- Delta P&L in dollari ---
@@ -1754,10 +1757,14 @@ async def _set_conditional(update: Update, context: ContextTypes.DEFAULT_TYPE, c
     # Risolvi trigger (assoluto / % / $)
     trigger_origin = None
     try:
+        # Se esiste già un ordine per questo simbolo, la % lavora sul prezzo attuale
+        is_update = any(v['coin'] == symbol and v['type'] == ctype
+                        for v in monitor.conditional_orders.get(chat_id, {}).values())
         trigger_px, trigger_origin = _resolve_trigger(
             trigger_raw, ctype, is_long,
             entry_px=track['entry_px'],
             size_contracts=track['size'],
+            current_px=current_px if is_update else None,
         )
     except ValueError as e:
         await update.message.reply_text(f"❌ Trigger non valido: {e}")
@@ -1873,11 +1880,18 @@ async def cancelcond_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(f"🗑 Cancellati {n} ordini condizionali.")
         return
 
-    if arg not in conds:
-        await update.message.reply_text(f"❌ Ordine `{arg}` non trovato.", parse_mode='Markdown')
+    # Prova prima come ID diretto, poi come simbolo
+    if arg in conds:
+        oid = arg
+    else:
+        oid = next((o for o, v in conds.items() if v['coin'] == arg), None)
+
+    if not oid:
+        await update.message.reply_text(
+            f"❌ Nessun ordine trovato per `{arg}`.", parse_mode='Markdown')
         return
 
-    o = conds.pop(arg)
+    o = conds.pop(oid)
     monitor.save_conditional_orders(chat_id)
     await update.message.reply_text(
         f"🗑 Cancellato: {_cond_label(o)}", parse_mode='Markdown'
