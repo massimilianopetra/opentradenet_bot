@@ -3036,10 +3036,6 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/analyze SIMBOLO [--dryrun] — Analisi tecnica AI con chart daily + 15m."""
     chat_id = update.effective_chat.id
 
-    if ANALYZE_ALLOWED_CHATS and chat_id not in ANALYZE_ALLOWED_CHATS:
-        await update.message.reply_text("⛔ Non sei autorizzato a usare /analyze.")
-        return
-
     if not context.args:
         await update.message.reply_text(
             "📊 Uso: /analyze SIMBOLO [--dryrun]\n"
@@ -3054,6 +3050,11 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _args_norm = [a.lower().lstrip('\u2014-') for a in context.args]
     dryrun  = ('--dryrun' in [a.lower() for a in context.args] or
                'dryrun' in _args_norm)
+
+    # Analisi a pagamento: solo utenti autorizzati
+    if not dryrun and ANALYZE_ALLOWED_CHATS and chat_id not in ANALYZE_ALLOWED_CHATS:
+        await update.message.reply_text("⛔ Non sei autorizzato a usare /analyze senza --dryrun.")
+        return
 
     if not dryrun and not ANTHROPIC_API_KEY:
         await update.message.reply_text("❌ ANTHROPIC_API_KEY non configurata nel .env")
