@@ -199,6 +199,35 @@ class HyperliquidClient:
 
         return positions
 
+    def get_trade_history(self, days: int = 7) -> list:
+        """
+        Restituisce i fill degli ultimi `days` giorni, ordinati per timestamp decrescente.
+        Non richiede private key.
+        """
+        import time
+        import requests
+        start_ms = int((time.time() - days * 86400) * 1000)
+        resp = requests.post(
+            f'{self.API_URL}/info',
+            json={'type': 'userFillsByTime', 'user': self.account_address, 'startTime': start_ms},
+            timeout=15
+        )
+        resp.raise_for_status()
+        raw = resp.json()
+        fills = []
+        for item in raw:
+            fills.append({
+                'coin':     item.get('coin', '?'),
+                'dir':      item.get('dir', ''),
+                'price':    float(item.get('px', 0) or 0),
+                'size':     float(item.get('sz', 0) or 0),
+                'pnl':      float(item.get('closedPnl', 0) or 0),
+                'fee':      float(item.get('fee', 0) or 0),
+                'time_ms':  int(item.get('time', 0) or 0),
+            })
+        fills.sort(key=lambda x: x['time_ms'], reverse=True)
+        return fills
+
     def set_leverage(self, coin: str, leverage: int, is_cross: bool = False, dex: str = '') -> dict:
         """
         Imposta la leva su un simbolo.

@@ -6,7 +6,7 @@ import logging.handlers
 import os
 import sys
 from typing import Dict, Set, Optional, Tuple
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from pathlib import Path
 from dotenv import load_dotenv
 import aiohttp
@@ -2922,6 +2922,82 @@ async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode='Markdown')
 
 
+async def trade_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if not _is_wallet_allowed(chat_id):
+        await update.message.reply_text("❌ Non autorizzato.")
+        return
+
+    addr = wallet_store.get_address(chat_id)
+    if not addr:
+        await update.message.reply_text(
+            "❌ Address non impostato.\n"
+            "Usa prima /setaddress 0x..."
+        )
+        return
+
+    days = 7
+    if context.args:
+        try:
+            days = max(1, min(30, int(context.args[0])))
+        except ValueError:
+            await update.message.reply_text("❌ Parametro giorni non valido. Usa un numero intero (1-30).")
+            return
+
+    await update.message.reply_text(f"⏳ Recupero trade history degli ultimi {days} giorni...")
+
+    try:
+        client = HyperliquidClient(addr)
+        fills = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: client.get_trade_history(days)
+        )
+    except Exception as e:
+        logger.error(f"Errore get_trade_history chat {chat_id}: {e}")
+        await update.message.reply_text(f"❌ Errore API: {e}")
+        return
+
+    if not fills:
+        await update.message.reply_text(f"📭 Nessun trade negli ultimi {days} giorni.")
+        return
+
+    closes = [f for f in fills if f['dir'].startswith('Close') or f['dir'] == 'Liquidated']
+    total_pnl   = sum(f['pnl'] for f in closes)
+    total_fees  = sum(f['fee'] for f in fills)
+    net_pnl     = total_pnl - total_fees
+    wins        = sum(1 for f in closes if f['pnl'] > 0)
+    win_rate    = (wins / len(closes) * 100) if closes else 0.0
+
+    pnl_sign    = "+" if net_pnl >= 0 else ""
+    gross_sign  = "+" if total_pnl >= 0 else ""
+
+    lines = [
+        f"<b>📊 Trade History — ultimi {days} giorni</b>",
+        "",
+        f"Net P&amp;L:   <b>{pnl_sign}${net_pnl:.2f}</b>",
+        f"Gross P&amp;L: {gross_sign}${total_pnl:.2f}",
+        f"Fees:       -${total_fees:.2f}",
+        f"Win rate:   {win_rate:.1f}%  ({wins}/{len(closes)} close)",
+        f"Fill totali: {len(fills)}",
+        "",
+        "<b>Ultimi close:</b>",
+    ]
+
+    shown = closes[:10]
+    for f in shown:
+        dt   = datetime.fromtimestamp(f['time_ms'] / 1000, tz=timezone.utc).strftime('%d/%m %H:%M')
+        side = 'L' if 'Long' in f['dir'] or 'long' in f['dir'] else 'S'
+        net  = f['pnl'] - f['fee']
+        sign = "+" if net >= 0 else ""
+        emoji = "✅" if net >= 0 else "❌"
+        lines.append(f"{emoji} <b>{f['coin']}</b> [{side}]  {sign}${net:.2f}  <i>{dt}</i>")
+
+    if len(closes) > 10:
+        remaining = len(closes) - 10
+        lines.append(f"<i>... e altri {remaining} close non mostrati</i>")
+
+    await update.message.reply_text("\n".join(lines), parse_mode='HTML')
+
+
 # ---------------------------------------------------------------------------
 # Lifecycle
 # ---------------------------------------------------------------------------
@@ -3335,6 +3411,7 @@ def main():
     app.add_handler(CommandHandler("message",  message_command))
     app.add_handler(CommandHandler("info",       info_command))
     app.add_handler(CommandHandler("reloadinfo", reloadinfo))
+    app.add_handler(CommandHandler("history",    trade_history))
 
     app.post_init     = post_init
     app.post_shutdown = post_shutdown
