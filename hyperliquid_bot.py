@@ -233,6 +233,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/scan [SYM] [SCORE]       — scan VSA manuale\n"
         "/scanstop                 — ferma scan automatico\n"
         "/scanstatus               — stato scanner\n"
+        "/info SYM                 — dettagli simbolo dal database\n"
+        "/reloadinfo               — ricarica symbols_info.json (solo admin)\n"
         "/stats — statistiche bot\n"
         "/help — questo messaggio\n"
         f"\n📌 Il tuo chat\\_id: `{update.effective_chat.id}`"
@@ -3181,6 +3183,40 @@ async def post_shutdown(application: Application):
     await monitor.close_session()
 
 
+async def reloadinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global _symbols_info
+    chat_id = update.effective_chat.id
+    if not _is_admin(chat_id):
+        await update.message.reply_text("❌ Comando riservato all'amministratore.")
+        return
+    try:
+        with open(_SYMBOLS_INFO_PATH, 'r', encoding='utf-8') as _f:
+            _symbols_info = json.load(_f)
+        n = len(_symbols_info)
+        logger.info(f"reloadinfo: symbols_info ricaricato da {_SYMBOLS_INFO_PATH} ({n} simboli)")
+        await update.message.reply_text(
+            f"✅ *symbols\\_info ricaricato con successo*\n\n"
+            f"📄 File: `{_SYMBOLS_INFO_PATH}`\n"
+            f"🔢 Simboli caricati: *{n}*",
+            parse_mode='Markdown'
+        )
+    except FileNotFoundError:
+        await update.message.reply_text(
+            f"❌ File non trovato: `{_SYMBOLS_INFO_PATH}`",
+            parse_mode='Markdown'
+        )
+    except json.JSONDecodeError as e:
+        await update.message.reply_text(
+            f"❌ Errore di parsing JSON: `{e}`",
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        await update.message.reply_text(
+            f"❌ Errore imprevisto: `{e}`",
+            parse_mode='Markdown'
+        )
+
+
 async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
@@ -3297,7 +3333,8 @@ def main():
     app.add_handler(CommandHandler("scanstatus",   scanstatus_command))
     app.add_handler(CommandHandler("cancelsl", cancelsl_command))
     app.add_handler(CommandHandler("message",  message_command))
-    app.add_handler(CommandHandler("info",     info_command))
+    app.add_handler(CommandHandler("info",       info_command))
+    app.add_handler(CommandHandler("reloadinfo", reloadinfo))
 
     app.post_init     = post_init
     app.post_shutdown = post_shutdown
