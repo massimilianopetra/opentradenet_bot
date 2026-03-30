@@ -193,6 +193,10 @@ class HyperliquidClient:
                         'margin':       margin,
                         'leverage':     lev_val,
                         'is_long':      szi > 0,
+                        'roe':               float(pos.get('returnOnEquity', 0) or 0),
+                        'funding_since_open': float((pos.get('cumFunding') or {}).get('sinceOpen', 0) or 0),
+                        'lev_type':          leverage.get('type', 'isolated') if isinstance(leverage, dict) else 'isolated',
+                        'pos_value':         float(pos.get('positionValue', 0) or 0),
                     })
             except Exception as e:
                 logger.error(f"Errore get_positions dex='{dex}': {e}")
@@ -563,4 +567,5 @@ class HyperliquidClient:
             'total_margin':     float(ms.get('totalMarginUsed', 0) or 0),
             'total_ntl_pos':    float(ms.get('totalNtlPos',     0) or 0),
             'total_raw_usd':    float(ms.get('totalRawUsd',     0) or 0),
+            'withdrawable':     float(state.get('withdrawable',  0) or 0),
         }

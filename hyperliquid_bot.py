@@ -2938,46 +2938,66 @@ async def walletinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if addr:
         await update.message.reply_text("⏳ Recupero saldo...")
+        pos_list = []
+        summary  = {}
         try:
-            client  = HyperliquidClient(addr)
-            summary = await asyncio.get_event_loop().run_in_executor(
-                None, client.get_account_summary
+            client = HyperliquidClient(addr)
+            summary, pos_list = await asyncio.gather(
+                asyncio.get_event_loop().run_in_executor(None, client.get_account_summary),
+                asyncio.get_event_loop().run_in_executor(
+                    None, lambda: client.get_positions(extra_dexs=SUPPORTED_DEXS)
+                ),
             )
-            equity    = summary['account_value']
-            margin    = summary['total_margin']
-            logger.info(f"DIAG /walletinfo chat={chat_id} addr={addr[:10]}... equity={equity:.2f} margin={margin:.2f}")
-            available = max(equity - margin, 0)
-            ntl_perp  = summary['total_ntl_pos']
-
-            ntl_xyz = 0.0
-            tracks  = monitor.position_tracks.get(chat_id, {})
-            all_px  = await monitor.fetch_all_prices() if tracks else {}
-            for coin, track in tracks.items():
-                if not track.get('dex'):
-                    continue
-                price_info = all_px.get(coin)
-                if price_info:
-                    ntl_xyz += abs(track['size'] * price_info[0])
-
-            ntl_tot = ntl_perp + ntl_xyz
-
-            n_conds = len(monitor.conditional_orders.get(chat_id, {}))
-
-            ntl_line = f"  Esposizione tot:  ${ntl_tot:,.2f}"
-            if ntl_xyz > 0:
-                ntl_line += f"  (PERP ${ntl_perp:,.2f} + XYZ ${ntl_xyz:,.2f})"
-
-            msg += (
-                f"\n💰 *Saldo*\n"
-                f"  Equity:           ${equity:,.2f}\n"
-                f"  Margine usato:    ${margin:,.2f}\n"
-                f"  Disponibile:      ${available:,.2f}\n"
-                f"{ntl_line}\n"
-            )
-            if n_conds:
-                msg += f"\n📌 Ordini condizionali attivi: {n_conds}  (/orders per dettagli)\n"
+            logger.info(f"DIAG /walletinfo chat={chat_id} equity={summary.get('account_value', 0):.2f} n_pos={len(pos_list)}")
         except Exception as e:
             msg += f"\n⚠️ Impossibile recuperare saldo: {e}\n"
+
+        if summary:
+            withdrawable  = summary.get('withdrawable',  0)
+            total_raw_usd = summary.get('total_raw_usd', 0)
+            total_ntl_pos = summary.get('total_ntl_pos', 0)
+            account_value = summary.get('account_value', 0)
+            total_margin  = summary.get('total_margin',  0)
+            balance_approx = total_raw_usd - total_ntl_pos
+            msg += (
+                f"\n💰 *Saldo*\n"
+                f"  Balance:        ${balance_approx:,.2f}\n"
+                f"  Disponibile:    ${withdrawable:,.2f}\n"
+                f"  Equity:         ${account_value:,.2f}\n"
+                f"  Margine in uso: ${total_margin:,.2f}\n"
+            )
+
+        if pos_list:
+            msg += f"\n📊 *Posizioni aperte ({len(pos_list)})*\n"
+            for p in pos_list:
+                direction = "📈 LONG" if p['is_long'] else "📉 SHORT"
+                dex_tag   = f" _{p['dex']}_" if p['dex'] != 'PERP' else " PERP"
+                lev_str   = f"{p['leverage']}x {p['lev_type']}"
+                pnl       = p['unrealized']
+                roe_pct   = p['roe'] * 100
+                pnl_sign  = "+" if pnl >= 0 else ""
+                roe_sign  = "+" if roe_pct >= 0 else ""
+                _lp       = monitor.last_prices.get(p['coin'])
+                current_px = _lp[0] if isinstance(_lp, (list, tuple)) else (_lp if isinstance(_lp, float) else None)
+
+                msg += (
+                    f"\n{direction}  *{p['coin']}*{dex_tag}  {lev_str}\n"
+                    f"  Size:    {abs(p['size']):.4g}\n"
+                    f"  Entry:   ${_fmt(p['entry_px'])}"
+                )
+                if current_px is not None:
+                    msg += f"   Ora: ${_fmt(current_px)}"
+                msg += (
+                    f"\n  PnL:     {pnl_sign}${pnl:,.2f}  ({roe_sign}{roe_pct:.2f}% ROE)\n"
+                    f"  Liq.:    ${_fmt(p['liq_px'])}\n"
+                )
+                if abs(p['funding_since_open']) > 0.001:
+                    f_sign = "+" if p['funding_since_open'] >= 0 else ""
+                    msg += f"  Funding: {f_sign}${p['funding_since_open']:.3f}\n"
+
+        n_conds = len(monitor.conditional_orders.get(chat_id, {}))
+        if n_conds:
+            msg += f"\n📌 Ordini condizionali attivi: {n_conds}  (/orders per dettagli)\n"
 
     msg += (
         f"\nComandi:\n"
