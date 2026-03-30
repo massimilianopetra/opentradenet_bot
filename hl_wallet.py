@@ -555,7 +555,9 @@ class HyperliquidClient:
         """
         info  = self._get_info()
         state = info.user_state(self.account_address)
+        logger.info(f"[walletinfo] user_state raw: {state}")
         ms    = state.get('marginSummary', {})
+        logger.info(f"[walletinfo] marginSummary: {ms}")
         return {
             'account_value':    float(ms.get('accountValue',    0) or 0),
             'total_margin':     float(ms.get('totalMarginUsed', 0) or 0),
