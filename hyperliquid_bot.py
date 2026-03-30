@@ -2984,12 +2984,13 @@ async def walletinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if current_px is not None:
                     msg += f"   Ora: ${_fmt(current_px)}"
                 msg += (
-                    f"\n  PnL:     {pnl_sign}${pnl:,.2f}  ({roe_sign}{roe_pct:.2f}% ROE)\n"
+                    f"\n  PnL:     {pnl_sign}${abs(pnl):,.2f}  ({roe_sign}{roe_pct:.2f}% ROE)\n"
                     f"  Liq.:    ${_fmt(p['liq_px'])}\n"
                 )
                 if abs(p['funding_since_open']) > 0.001:
-                    f_sign = "+" if p['funding_since_open'] >= 0 else ""
-                    msg += f"  Funding: {f_sign}${p['funding_since_open']:.3f}\n"
+                    f_val  = p['funding_since_open']
+                    f_sign = "+" if f_val >= 0 else "-"
+                    msg += f"  Funding: {f_sign}${abs(f_val):.3f}\n"
 
         n_conds = len(monitor.conditional_orders.get(chat_id, {}))
         if n_conds:
