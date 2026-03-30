@@ -1226,7 +1226,7 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             tmp_path = None
             try:
                 fig = await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: _mls.plot_fvg_chart(symbol, daily, fvg, current_price)
+                    None, lambda: _mls.plot_fvg_chart(symbol, daily, fvg, current_price, data)
                 )
                 import tempfile as _tf, os as _os
                 with _tf.NamedTemporaryFile(suffix='.png', delete=False) as tmp:

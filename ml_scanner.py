@@ -1787,18 +1787,43 @@ def scan_fvg_all(live_prices: dict) -> list:
     return results
 
 
-def plot_fvg_chart(symbol: str, daily_candles: list, fvg: dict, current_price: float):
+def plot_fvg_chart(symbol: str, daily_candles: list, fvg: dict, current_price: float,
+                   candles_15m: dict | None = None):
     """
     Genera un grafico candlestick daily (ultime 60 candele) con la zona FVG evidenziata.
+    Se candles_15m è fornito, aggiunge la candela odierna parziale (live) come ultima barra.
     Stile dark coerente con candle_chart.py.
     Ritorna matplotlib.figure.Figure.
     """
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
+    from datetime import datetime as _dt
+
+    # Candela odierna parziale costruita dai 15m di oggi
+    today_str = _dt.utcnow().date().isoformat()
+    today_candle = None
+    if candles_15m is not None:
+        ts_list = candles_15m.get('timestamps', [])
+        opens_15 = candles_15m.get('opens', [])
+        highs_15 = candles_15m.get('highs', [])
+        lows_15  = candles_15m.get('lows',  [])
+        closes_15 = candles_15m.get('closes', [])
+        today_idx = [i for i, t in enumerate(ts_list) if str(t)[:10] == today_str]
+        if today_idx:
+            today_candle = {
+                'date':  today_str + ' (live)',
+                'open':  opens_15[today_idx[0]],
+                'high':  max(highs_15[i] for i in today_idx),
+                'low':   min(lows_15[i]  for i in today_idx),
+                'close': closes_15[today_idx[-1]],
+            }
 
     candles = daily_candles[-60:]
+    if today_candle:
+        candles = candles + [today_candle]
     n = len(candles)
+    live_idx = n - 1 if today_candle else None
 
     opens  = [float(c['open'])  for c in candles]
     highs  = [float(c['high'])  for c in candles]
@@ -1818,33 +1843,38 @@ def plot_fvg_chart(symbol: str, daily_candles: list, fvg: dict, current_price: f
     w_wick = 0.08
 
     for i in range(n):
-        bull    = closes[i] >= opens[i]
-        col     = '#26a641' if bull else '#f85149'
-        lo_b    = min(opens[i], closes[i])
-        hi_b    = max(opens[i], closes[i])
-        body_h  = max(hi_b - lo_b, (highs[i] - lows[i]) * 0.002)
+        bull   = closes[i] >= opens[i]
+        is_live = (i == live_idx)
+        if is_live:
+            col = '#74c99a' if bull else '#f4a59a'   # colore attenuato = candela in corso
+        else:
+            col = '#26a641' if bull else '#f85149'
+        lo_b   = min(opens[i], closes[i])
+        hi_b   = max(opens[i], closes[i])
+        body_h = max(hi_b - lo_b, (highs[i] - lows[i]) * 0.002)
+        alpha  = 0.75 if is_live else 1.0
         # wick
-        ax.bar(i, highs[i] - lows[i], bottom=lows[i], width=w_wick, color=col, zorder=2)
+        ax.bar(i, highs[i] - lows[i], bottom=lows[i], width=w_wick, color=col, zorder=2, alpha=alpha)
         # corpo
-        ax.bar(i, body_h, bottom=lo_b, width=w_body, color=col, zorder=3)
+        ax.bar(i, body_h, bottom=lo_b, width=w_body, color=col, zorder=3, alpha=alpha)
 
-    # Banda FVG
-    if fvg['type'] == 'BULLISH':
-        fvg_color = '#00ff88'
-        fvg_label = 'FVG Bull'
-    else:
-        fvg_color = '#ff4444'
-        fvg_label = 'FVG Bear'
-
-    ax.axhspan(fvg['gap_low'], fvg['gap_high'], alpha=0.25, color=fvg_color, zorder=2, label=fvg_label)
+    # Banda FVG — sempre blu semitrasparente
+    fvg_type = fvg['type']
+    fvg_label = 'FVG Bull' if fvg_type == 'BULLISH' else 'FVG Bear'
+    ax.axhspan(fvg['gap_low'], fvg['gap_high'],
+               alpha=0.18, color='#3b82f6', zorder=2, label=fvg_label)
+    # Bordi della banda
+    ax.axhline(fvg['gap_low'],  color='#3b82f6', linewidth=0.8, linestyle='-', alpha=0.7)
+    ax.axhline(fvg['gap_high'], color='#3b82f6', linewidth=0.8, linestyle='-', alpha=0.7)
 
     # Linea prezzo attuale
-    ax.axhline(current_price, color='white', linewidth=0.8, linestyle='--', label=f'Price {current_price:.4g}')
+    ax.axhline(current_price, color='white', linewidth=0.8, linestyle='--',
+               label=f'Price {current_price:.4g}')
 
-    # Annotazione zona gap
+    # Annotazione zona gap — testo bianco
     mid_y   = (fvg['gap_low'] + fvg['gap_high']) / 2
     gap_txt = f"{fvg['gap_low']:.3f} – {fvg['gap_high']:.3f} ({fvg['gap_size_pct']:.2f}%)"
-    ax.text(1, mid_y, gap_txt, color=fvg_color, fontsize=8, va='center', alpha=0.9)
+    ax.text(1, mid_y, gap_txt, color='white', fontsize=8, va='center', alpha=0.9)
 
     # Asse X: mostra alcune date
     step = max(1, n // 10)
@@ -1855,7 +1885,7 @@ def plot_fvg_chart(symbol: str, daily_candles: list, fvg: dict, current_price: f
 
     ax.legend(loc='upper left', fontsize=7, facecolor='#161b22', labelcolor='#8b949e', framealpha=0.8)
 
-    fvg_em = '🟢 BULLISH' if fvg['type'] == 'BULLISH' else '🔴 BEARISH'
+    fvg_em = '🟢 BULLISH' if fvg_type == 'BULLISH' else '🔴 BEARISH'
     ax.set_title(f"{symbol} · 1D · FVG {fvg_em}", color='#e6edf3', fontsize=11, pad=8)
 
     fig.tight_layout()
