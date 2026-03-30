@@ -1548,8 +1548,8 @@ async def stoploss_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Uso: /stoploss SIMBOLO VALORE\n\n"
             "Il VALORE può essere:\n"
             "  `4600`   → prezzo esplicito\n"
-            "  `2%`     → distanza % dall'entry\n"
-            "  `50$`    → perdita massima in dollari\n\n"
+            "  `2%`     → distanza % dal prezzo attuale\n"
+            "  `50$`    → perdita massima in dollari dal prezzo attuale\n\n"
             "L'ordine viene inserito direttamente su Hyperliquid.\n"
             "Rimane attivo anche se il bot è offline.\n\n"
             "Esempi:\n"
@@ -1596,11 +1596,15 @@ async def stoploss_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             await update.message.reply_text("❌ Percentuale non valida.")
             return
+        if current_px is None:
+            await update.message.reply_text(
+                "❌ Impossibile recuperare il prezzo attuale — usa un prezzo esplicito.")
+            return
         if is_long:
-            trigger_px = entry_px * (1 - pct / 100)
+            trigger_px = current_px * (1 - pct / 100)
         else:
-            trigger_px = entry_px * (1 + pct / 100)
-        mode_label = f"entry {_fmt(entry_px)} -{pct}%"
+            trigger_px = current_px * (1 + pct / 100)
+        mode_label = f"prezzo attuale {_fmt(current_px)} -{pct}%"
 
     elif raw.endswith('$'):
         # Perdita massima in dollari
@@ -1620,11 +1624,15 @@ async def stoploss_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Size posizione zero, impossibile calcolare.")
             return
         delta_px = loss_usd / size
+        if current_px is None:
+            await update.message.reply_text(
+                "❌ Impossibile recuperare il prezzo attuale — usa un prezzo esplicito.")
+            return
         if is_long:
-            trigger_px = entry_px - delta_px
+            trigger_px = current_px - delta_px
         else:
-            trigger_px = entry_px + delta_px
-        mode_label = f"entry {_fmt(entry_px)} -${loss_usd}"
+            trigger_px = current_px + delta_px
+        mode_label = f"prezzo attuale {_fmt(current_px)} -${loss_usd}"
 
     else:
         # Prezzo esplicito
@@ -1791,46 +1799,44 @@ async def takeprofit_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 def _resolve_trigger(raw: str, ctype: str, is_long: bool,
-                     entry_px: float, size_contracts: float,
-                     current_px: float | None = None) -> tuple:
+                     current_px: float, entry_px: float,
+                     size_contracts: float) -> tuple:
     """
     Converte l'argomento trigger in prezzo assoluto.
 
     Formati accettati:
       "5600"    → prezzo assoluto (comportamento storico)
-      "1.3%"    → % sul prezzo di carico  → entry_px ± 1.3%
-      "12$"     → delta P&L in USD        → entry_px ± (12 / abs(size_contracts))
+      "1.3%"    → % sul prezzo attuale  → current_px ± 1.3%
+      "12$"     → delta in dollari      → current_px ± (12 / abs(size_contracts))
 
     Segno automatico:
-      TP LONG  → +  (trigger sopra entry)
-      TP SHORT → -  (trigger sotto entry)
-      SL LONG  → -  (trigger sotto entry)
-      SL SHORT → +  (trigger sopra entry)
+      TP LONG  → +  (trigger sopra current)
+      TP SHORT → -  (trigger sotto current)
+      SL LONG  → -  (trigger sotto current)
+      SL SHORT → +  (trigger sopra current)
 
     Ritorna (trigger_px: float, origin_desc: str) oppure
     solleva ValueError se il formato non è riconosciuto.
     """
     raw = raw.strip().replace(',', '.')
 
-    # Determina se il trigger deve essere sopra (+1) o sotto (-1) l'entry
+    # Determina se il trigger deve essere sopra (+1) o sotto (-1) il prezzo attuale
     if ctype == 'takeprofit':
         sign = +1 if is_long else -1
     else:  # stoploss
         sign = -1 if is_long else +1
 
-    # --- Percentuale sul prezzo di carico ---
+    # --- Percentuale sul prezzo attuale ---
     if raw.endswith('%'):
         pct_val = float(raw[:-1])
-        if pct_val < 0:
-            raise ValueError("La percentuale deve essere non negativa")
-        base_px    = current_px if current_px is not None else entry_px
-        delta      = base_px * pct_val / 100
-        trigger_px = round(base_px + sign * delta, 8)
-        base_label = f"prezzo attuale ${_fmt(base_px)}" if current_px is not None else f"entry ${_fmt(entry_px)}"
-        desc       = f"{pct_val}% su {base_label}"
+        if pct_val <= 0:
+            raise ValueError("La percentuale deve essere positiva")
+        delta      = current_px * pct_val / 100
+        trigger_px = round(current_px + sign * delta, 8)
+        desc       = f"{pct_val}% su prezzo attuale ${_fmt(current_px)}"
         return trigger_px, desc
 
-    # --- Delta P&L in dollari ---
+    # --- Delta in dollari dal prezzo attuale ---
     if raw.endswith('$'):
         usd_val = float(raw[:-1])
         if usd_val <= 0:
@@ -1838,8 +1844,8 @@ def _resolve_trigger(raw: str, ctype: str, is_long: bool,
         if abs(size_contracts) < 1e-12:
             raise ValueError("Size posizione zero, impossibile calcolare il trigger")
         delta      = usd_val / abs(size_contracts)
-        trigger_px = round(entry_px + sign * delta, 8)
-        desc       = f"${usd_val} P&L su entry ${_fmt(entry_px)}"
+        trigger_px = round(current_px + sign * delta, 8)
+        desc       = f"${usd_val} da prezzo attuale ${_fmt(current_px)}"
         return trigger_px, desc
 
     # --- Prezzo assoluto (default) ---
@@ -1862,13 +1868,13 @@ async def _set_conditional(update: Update, context: ContextTypes.DEFAULT_TYPE, c
             f"Uso: /{ctype} SIMBOLO TRIGGER [size|%]\n\n"
             f"TRIGGER può essere:\n"
             f"  `5600`    — prezzo assoluto\n"
-            f"  `1.3%`    — % sul prezzo di carico\n"
-            f"  `12$`     — delta P&L in dollari\n\n"
+            f"  `1.3%`    — % sul prezzo attuale\n"
+            f"  `12$`     — delta in dollari dal prezzo attuale\n\n"
             f"Esempi:\n"
             f"  /{ctype} GOLD 5100       — prezzo assoluto\n"
-            f"  /{ctype} GOLD 1.5%       — 1.5% dal carico\n"
+            f"  /{ctype} GOLD 1.5%       — 1.5% dal prezzo attuale\n"
             f"  /{ctype} GOLD 15$        — $15 di guadagno/perdita\n"
-            f"  /{ctype} GOLD 1.5% 50%  — 1.5% dal carico, chiudi 50%",
+            f"  /{ctype} GOLD 1.5% 50%  — 1.5% dal prezzo attuale, chiudi 50%",
             parse_mode='Markdown'
         )
         return
@@ -1903,14 +1909,11 @@ async def _set_conditional(update: Update, context: ContextTypes.DEFAULT_TYPE, c
     # Risolvi trigger (assoluto / % / $)
     trigger_origin = None
     try:
-        # Se esiste già un ordine per questo simbolo, la % lavora sul prezzo attuale
-        is_update = any(v['coin'] == symbol and v['type'] == ctype
-                        for v in monitor.conditional_orders.get(chat_id, {}).values())
         trigger_px, trigger_origin = _resolve_trigger(
             trigger_raw, ctype, is_long,
+            current_px=current_px,
             entry_px=track['entry_px'],
             size_contracts=track['size'],
-            current_px=current_px if is_update else None,
         )
     except ValueError as e:
         await update.message.reply_text(f"❌ Trigger non valido: {e}")
