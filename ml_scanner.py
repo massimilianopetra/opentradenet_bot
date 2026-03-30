@@ -1822,12 +1822,14 @@ def plot_fvg_chart(symbol: str, daily_candles: list, fvg: dict, current_price: f
         closes_15 = candles_15m.get('closes', [])
         today_idx = [i for i, t in enumerate(ts_list) if str(t)[:10] == today_str]
         if today_idx:
+            csv_high = max(highs_15[i] for i in today_idx)
+            csv_low  = min(lows_15[i]  for i in today_idx)
             today_candle = {
                 'date':  today_str + ' (live)',
                 'open':  opens_15[today_idx[0]],
-                'high':  max(highs_15[i] for i in today_idx),
-                'low':   min(lows_15[i]  for i in today_idx),
-                'close': closes_15[today_idx[-1]],
+                'high':  max(csv_high, current_price),   # estende se il live è fuori range
+                'low':   min(csv_low,  current_price),
+                'close': current_price,                  # close = prezzo live attuale
             }
 
     candles = daily_candles[-60:]
