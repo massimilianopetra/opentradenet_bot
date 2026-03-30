@@ -2357,7 +2357,7 @@ async def close_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not pos:
         try:
             client   = HyperliquidClient(addr, private_key=key)
-            pos_list, _av = await asyncio.get_event_loop().run_in_executor(
+            pos_list, _av, _wm = await asyncio.get_event_loop().run_in_executor(
                 None, lambda: client.get_positions(extra_dexs=SUPPORTED_DEXS)
             )
             pos = next((p for p in pos_list if p['coin'].upper() == symbol), None)
@@ -2563,7 +2563,7 @@ async def order_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # --- Fetch immediato posizioni per aggiornare position_tracks ---
             try:
-                _pos_list, _av = await asyncio.get_event_loop().run_in_executor(
+                _pos_list, _av, _wm = await asyncio.get_event_loop().run_in_executor(
                     None, lambda: client.get_positions(extra_dexs=SUPPORTED_DEXS)
                 )
                 _current = monitor.position_tracks.get(chat_id, {})
@@ -2942,7 +2942,7 @@ async def walletinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         summary  = {}
         try:
             client = HyperliquidClient(addr)
-            summary, (pos_list, account_values) = await asyncio.gather(
+            summary, (pos_list, account_values, withdrawable_map) = await asyncio.gather(
                 asyncio.get_event_loop().run_in_executor(None, client.get_account_summary),
                 asyncio.get_event_loop().run_in_executor(
                     None, lambda: client.get_positions(extra_dexs=SUPPORTED_DEXS)
@@ -2954,7 +2954,7 @@ async def walletinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if summary:
             balance      = sum(account_values.values()) if account_values else 0
-            withdrawable = summary.get('withdrawable', 0)
+            withdrawable = sum(withdrawable_map.values()) if withdrawable_map else summary.get('withdrawable', 0)
             total_margin = summary.get('total_margin', 0)
             msg += (
                 f"\n💰 *Saldo*\n"
@@ -3024,7 +3024,7 @@ async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         client   = HyperliquidClient(addr)
-        pos_list, _av = await asyncio.get_event_loop().run_in_executor(
+        pos_list, _av, _wm = await asyncio.get_event_loop().run_in_executor(
             None, lambda: client.get_positions(extra_dexs=SUPPORTED_DEXS)
         )
         logger.info(f"DIAG /positions chat={chat_id} addr={addr[:10]}... found={len(pos_list)} supported_dexs={SUPPORTED_DEXS}")

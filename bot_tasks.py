@@ -580,7 +580,7 @@ async def position_tracking_task(application) -> None:
 
                 try:
                     client   = HyperliquidClient(addr)
-                    pos_list, _av = await asyncio.get_event_loop().run_in_executor(
+                    pos_list, _av, _wm = await asyncio.get_event_loop().run_in_executor(
                         None,
                         lambda: client.get_positions(extra_dexs=SUPPORTED_DEXS)
                     )

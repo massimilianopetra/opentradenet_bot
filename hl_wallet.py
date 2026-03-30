@@ -142,15 +142,17 @@ class HyperliquidClient:
 
     def get_positions(self, extra_dexs: list = None) -> tuple:
         """
-        Restituisce (positions, account_values) dove:
+        Restituisce (positions, account_values, withdrawable_map) dove:
         - positions: lista di dict con le posizioni aperte
         - account_values: dict {dex_label: float} con l'accountValue di ciascun clearinghouse
+        - withdrawable_map: dict {dex_label: float} con il withdrawable di ciascun clearinghouse
         Legge il dex principale (perp standard) + tutti i dex extra (es. ['xyz']).
         Non richiede private key.
         """
-        info           = self._get_info()
-        positions      = []
-        account_values = {}
+        info             = self._get_info()
+        positions        = []
+        account_values   = {}
+        withdrawable_map = {}
 
         # Legge tutti i dex: "" = perp standard, + quelli extra (xyz ecc.)
         dexs_to_query = [''] + (extra_dexs or [])
@@ -173,7 +175,8 @@ class HyperliquidClient:
                 ms         = state.get('marginSummary', {})
                 av         = float(ms.get('accountValue', 0) or 0)
                 dex_label  = dex if dex else 'PERP'
-                account_values[dex_label] = av
+                account_values[dex_label]   = av
+                withdrawable_map[dex_label] = float(state.get('withdrawable', 0) or 0)
 
                 logger.debug(f"dex='{dex}' assetPositions: {len(state.get('assetPositions', []))} accountValue: {av}")
 
@@ -210,7 +213,7 @@ class HyperliquidClient:
             except Exception as e:
                 logger.error(f"Errore get_positions dex='{dex}': {e}")
 
-        return positions, account_values
+        return positions, account_values, withdrawable_map
 
     def get_trade_history(self, days: int = 7) -> list:
         """
@@ -339,7 +342,7 @@ class HyperliquidClient:
         Se entrambi None chiude tutto.
         """
         # Legge size attuale
-        pos_list, _ = self.get_positions(extra_dexs=[dex] if dex else [])
+        pos_list, _, _ = self.get_positions(extra_dexs=[dex] if dex else [])
         coin_up  = coin.upper()
         pos      = next((p for p in pos_list if p['coin'].upper() == coin_up), None)
         if pos is None:
@@ -398,7 +401,7 @@ class HyperliquidClient:
         il formato atteso internamente dall'SDK per evitare errori di formattazione.
         """
         # Legge posizione aperta per ricavare size e direzione
-        pos_list, _ = self.get_positions(extra_dexs=[dex] if dex else [])
+        pos_list, _, _ = self.get_positions(extra_dexs=[dex] if dex else [])
         coin_up  = coin.upper()
         pos      = next((p for p in pos_list if p['coin'].upper() == coin_up), None)
         if pos is None:
