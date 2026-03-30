@@ -981,12 +981,14 @@ _SCAN_HELP = (
     "`/scan vsa [N]`        — top N simboli per score VSA (def. 10)\n"
     "`/scan volume [N]`     — top N spike di volume su 15m (def. 10)\n"
     "`/scan pattern [N]`    — top N simboli per pattern candlestick (def. 10)\n"
+    "`/scan fvg`            — FVG daily su tutti i simboli\n"
+    "`/scan fvg SIMBOLO`    — FVG daily dettagliato con grafico\n"
     "`/scan daemon vsa [SCORE]`    — alert VSA automatico ogni 15m (def.)\n"
     "`/scan daemon volume [SCORE]` — alert volume spike automatico ogni 15m\n"
     "`/scan daemon pattern`        — alert pattern candlestick automatico ogni 15m\n"
     "`/scan oi`             — _coming soon_\n"
     "`/scan [SYM] [SCORE]`  — scan VSA manuale (tutti o un simbolo)\n"
-    "\nEs: `/scan vsa 5`  `/scan volume 5`  `/scan pattern 5`  `/scan BTC`  `/scan 70`"
+    "\nEs: `/scan vsa 5`  `/scan volume 5`  `/scan pattern 5`  `/scan fvg`  `/scan fvg BTC`  `/scan BTC`  `/scan 70`"
 )
 
 
@@ -1175,6 +1177,128 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text(msg, parse_mode='HTML')
                 except Exception as e:
                     logger.error(f"Errore invio pattern alert: {e}")
+
+        return
+
+    # ── fvg ──────────────────────────────────────────────────────────────────
+    if mode == 'fvg':
+        symbol = None
+        for arg in args[1:]:
+            if arg.upper() not in ('FVG',) and not arg.isdigit():
+                symbol = arg.upper()
+                break
+
+        if symbol:
+            # ── Dettaglio singolo simbolo ─────────────────────────────────────
+            await update.message.reply_text(f"🔍 Analisi FVG daily per {symbol}...")
+            data = _mls.load_last_candles(symbol, 3000)
+            if data is None:
+                await update.message.reply_text(f"❌ Nessun dato candele per {symbol}.")
+                return
+
+            daily = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: _mls._resample_daily_from_data(data)
+            )
+
+            live_prices = await _mls.fetch_live_prices()
+            current_price = (
+                live_prices.get(symbol)
+                or monitor.last_prices.get(symbol)
+                or (data['closes'][-1] if data['closes'] else None)
+            )
+            if current_price is None:
+                await update.message.reply_text(f"❌ Prezzo non disponibile per {symbol}.")
+                return
+            current_price = float(current_price)
+
+            fvg = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: _mls.detect_fvg(daily, current_price)
+            )
+
+            if fvg is None:
+                await update.message.reply_text(
+                    f"📭 Nessun FVG attivo trovato su {symbol}.\n"
+                    f"Candele daily analizzate: {len(daily)}"
+                )
+                return
+
+            # Grafico
+            tmp_path = None
+            try:
+                fig = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: _mls.plot_fvg_chart(symbol, daily, fvg, current_price)
+                )
+                import tempfile as _tf, os as _os
+                with _tf.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                    tmp_path = tmp.name
+                fig.savefig(tmp_path, dpi=110, bbox_inches='tight', facecolor='#0d1117')
+                plt.close(fig)
+                with open(tmp_path, 'rb') as f:
+                    await update.message.reply_photo(
+                        photo=f,
+                        caption=f"📐 FVG Daily — {symbol}"
+                    )
+            except Exception as e:
+                logger.error(f"Errore generazione chart FVG {symbol}: {e}")
+            finally:
+                if tmp_path:
+                    try:
+                        import os as _os2
+                        _os2.unlink(tmp_path)
+                    except Exception:
+                        pass
+
+            # Testo dettaglio
+            fvg_type_em = "🟢 BULLISH" if fvg['type'] == 'BULLISH' else "🔴 BEARISH"
+            dist_sign   = "+" if fvg['distance_pct'] >= 0 else ""
+            msg = (
+                f"📐 <b>{symbol} — Fair Value Gap Daily</b>\n\n"
+                f"Tipo: {fvg_type_em}\n"
+                f"Zona gap: <b>{fvg['gap_low']:.4g} – {fvg['gap_high']:.4g}</b>  "
+                f"(+{fvg['gap_size_pct']:.2f}%)\n"
+                f"Formato il: {fvg['date_formed']}\n"
+                f"Prezzo attuale: {current_price:.4g}\n"
+                f"Distanza dal gap: {dist_sign}{fvg['distance_pct']:.2f}%\n\n"
+                f"💡 Il FVG rappresenta una zona di squilibrio dove il mercato\n"
+                f"potrebbe tornare a cercare liquidità."
+            )
+            try:
+                await update.message.reply_text(msg, parse_mode='HTML')
+            except Exception as e:
+                logger.error(f"Errore invio testo FVG {symbol}: {e}")
+
+        else:
+            # ── Scan multi-simbolo ────────────────────────────────────────────
+            n_syms = len(_mls.discover_symbols())
+            await update.message.reply_text(f"🔍 Scan FVG daily in corso su {n_syms} simboli...")
+
+            live_prices = await _mls.fetch_live_prices()
+            results = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: _mls.scan_fvg_all(live_prices)
+            )
+
+            if not results:
+                await update.message.reply_text("📭 Nessun FVG attivo trovato.")
+                return
+
+            lines = [f"📐 <b>Fair Value Gap Daily</b> — {len(results)} simboli con FVG attivo\n"]
+            for r in results[:20]:
+                sym = r['symbol']
+                fvg = r['fvg']
+                em  = "🟢" if fvg['type'] == 'BULLISH' else "🔴"
+                ftype = fvg['type']
+                dist_sign = "+" if fvg['distance_pct'] >= 0 else ""
+                lines.append(
+                    f"{em} <b>{sym}</b>  {ftype}  "
+                    f"gap: {fvg['gap_low']:.4g}–{fvg['gap_high']:.4g} "
+                    f"({fvg['gap_size_pct']:.2f}%)  "
+                    f"dist: {dist_sign}{fvg['distance_pct']:.1f}%"
+                )
+
+            try:
+                await update.message.reply_text("\n".join(lines), parse_mode='HTML')
+            except Exception as e:
+                logger.error(f"Errore invio scan FVG multi-simbolo: {e}")
 
         return
 

@@ -1637,5 +1637,230 @@ def format_pattern_alert(r: dict) -> str:
     return '\n'.join(lines)
 
 
+# ---------------------------------------------------------------------------
+# 8. FAIR VALUE GAP (FVG) — Daily
+# ---------------------------------------------------------------------------
+
+def resample_daily(candles_15m: list) -> list:
+    """
+    Aggrega candele 15m in daily.
+    candles_15m: lista di dict con chiavi timestamp, open, high, low, close, volume
+    Scarta il giorno corrente UTC (incompleto).
+    Ritorna lista di dict {date, open, high, low, close, volume} ordinata cronologicamente.
+    """
+    from datetime import datetime as _dt
+    today_str = _dt.utcnow().date().isoformat()
+
+    groups: dict = {}
+    for c in candles_15m:
+        ts = c['timestamp'] if isinstance(c, dict) else str(c)
+        date_key = str(ts)[:10]
+        if date_key == today_str:
+            continue
+        if date_key not in groups:
+            groups[date_key] = []
+        groups[date_key].append(c)
+
+    result = []
+    for date_key in sorted(groups.keys()):
+        day = groups[date_key]
+        try:
+            result.append({
+                'date':   date_key,
+                'open':   float(day[0]['open'] if isinstance(day[0], dict) else day[0]),
+                'high':   max(float(c['high'] if isinstance(c, dict) else c) for c in day),
+                'low':    min(float(c['low']  if isinstance(c, dict) else c) for c in day),
+                'close':  float(day[-1]['close'] if isinstance(day[-1], dict) else day[-1]),
+                'volume': sum(float(c['volume'] if isinstance(c, dict) else 0) for c in day),
+            })
+        except (KeyError, ValueError, TypeError):
+            continue
+    return result
+
+
+def _resample_daily_from_data(data: dict) -> list:
+    """
+    Converte il formato interno di load_last_candles in lista di dict
+    poi chiama resample_daily.
+    """
+    candles = []
+    ts_list   = data.get('timestamps', [])
+    opens     = data.get('opens',  [])
+    highs     = data.get('highs',  [])
+    lows      = data.get('lows',   [])
+    closes    = data.get('closes', [])
+    volumes   = data.get('volumes', [])
+    for i in range(len(ts_list)):
+        candles.append({
+            'timestamp': ts_list[i],
+            'open':      opens[i],
+            'high':      highs[i],
+            'low':       lows[i],
+            'close':     closes[i],
+            'volume':    volumes[i] if i < len(volumes) else 0.0,
+        })
+    return resample_daily(candles)
+
+
+def detect_fvg(daily_candles: list, current_price: float):
+    """
+    Cerca il FVG più recente attivo nelle ultime 20 candele daily.
+
+    FVG BULLISH: daily[i].low > daily[i-2].high  →  gap tra daily[i-2].high e daily[i].low
+    FVG BEARISH: daily[i].high < daily[i-2].low  →  gap tra daily[i].high e daily[i-2].low
+
+    Un FVG è "attivo" se il prezzo non ha ancora attraversato completamente il gap:
+      BULLISH attivo: current_price > gap_low
+      BEARISH attivo: current_price < gap_high
+
+    Ritorna dict o None.
+    """
+    n = len(daily_candles)
+    if n < 3:
+        return None
+
+    start = max(2, n - 20)
+    for i in range(n - 1, start - 1, -1):
+        c_curr = daily_candles[i]
+        c_prev = daily_candles[i - 1]   # non usata nella formula, ma è la candela centrale
+        c_prev2 = daily_candles[i - 2]
+
+        # BULLISH FVG
+        if float(c_curr['low']) > float(c_prev2['high']):
+            gap_low  = float(c_prev2['high'])
+            gap_high = float(c_curr['low'])
+            if current_price > gap_low:   # attivo
+                gap_size_pct = (gap_high - gap_low) / gap_low * 100
+                distance_pct = (current_price - gap_low) / gap_low * 100
+                return {
+                    'type':         'BULLISH',
+                    'gap_low':      gap_low,
+                    'gap_high':     gap_high,
+                    'gap_size_pct': gap_size_pct,
+                    'date_formed':  c_curr['date'],
+                    'distance_pct': distance_pct,
+                }
+
+        # BEARISH FVG
+        if float(c_curr['high']) < float(c_prev2['low']):
+            gap_low  = float(c_curr['high'])
+            gap_high = float(c_prev2['low'])
+            if current_price < gap_high:   # attivo
+                gap_size_pct = (gap_high - gap_low) / gap_low * 100
+                distance_pct = (gap_high - current_price) / current_price * 100
+                return {
+                    'type':         'BEARISH',
+                    'gap_low':      gap_low,
+                    'gap_high':     gap_high,
+                    'gap_size_pct': gap_size_pct,
+                    'date_formed':  c_curr['date'],
+                    'distance_pct': distance_pct,
+                }
+
+    return None
+
+
+def scan_fvg_all(live_prices: dict) -> list:
+    """
+    Itera tutti i simboli disponibili, cerca l'FVG daily più recente attivo
+    e ritorna lista di dict {symbol, fvg} ordinata per |distance_pct| crescente.
+    """
+    results = []
+    for sym in discover_symbols():
+        try:
+            data = load_last_candles(sym, 3000)
+            if data is None:
+                continue
+            daily = _resample_daily_from_data(data)
+            if len(daily) < 3:
+                continue
+            price = live_prices.get(sym) or (data['closes'][-1] if data['closes'] else None)
+            if price is None:
+                continue
+            fvg = detect_fvg(daily, float(price))
+            if fvg is not None:
+                results.append({'symbol': sym, 'fvg': fvg})
+        except Exception:
+            continue
+
+    results.sort(key=lambda r: abs(r['fvg']['distance_pct']))
+    return results
+
+
+def plot_fvg_chart(symbol: str, daily_candles: list, fvg: dict, current_price: float):
+    """
+    Genera un grafico candlestick daily (ultime 60 candele) con la zona FVG evidenziata.
+    Stile dark coerente con candle_chart.py.
+    Ritorna matplotlib.figure.Figure.
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    candles = daily_candles[-60:]
+    n = len(candles)
+
+    opens  = [float(c['open'])  for c in candles]
+    highs  = [float(c['high'])  for c in candles]
+    lows   = [float(c['low'])   for c in candles]
+    closes = [float(c['close']) for c in candles]
+    dates  = [c['date']         for c in candles]
+
+    fig = plt.figure(figsize=(14, 8), facecolor='#0d1117')
+    ax  = fig.add_subplot(1, 1, 1)
+    ax.set_facecolor('#0d1117')
+    ax.tick_params(colors='#8b949e', labelsize=8)
+    for spine in ax.spines.values():
+        spine.set_color('#30363d')
+    ax.yaxis.label.set_color('#8b949e')
+
+    w_body = 0.6
+    w_wick = 0.08
+
+    for i in range(n):
+        bull    = closes[i] >= opens[i]
+        col     = '#26a641' if bull else '#f85149'
+        lo_b    = min(opens[i], closes[i])
+        hi_b    = max(opens[i], closes[i])
+        body_h  = max(hi_b - lo_b, (highs[i] - lows[i]) * 0.002)
+        # wick
+        ax.bar(i, highs[i] - lows[i], bottom=lows[i], width=w_wick, color=col, zorder=2)
+        # corpo
+        ax.bar(i, body_h, bottom=lo_b, width=w_body, color=col, zorder=3)
+
+    # Banda FVG
+    if fvg['type'] == 'BULLISH':
+        fvg_color = '#00ff88'
+        fvg_label = 'FVG Bull'
+    else:
+        fvg_color = '#ff4444'
+        fvg_label = 'FVG Bear'
+
+    ax.axhspan(fvg['gap_low'], fvg['gap_high'], alpha=0.25, color=fvg_color, zorder=2, label=fvg_label)
+
+    # Linea prezzo attuale
+    ax.axhline(current_price, color='white', linewidth=0.8, linestyle='--', label=f'Price {current_price:.4g}')
+
+    # Annotazione zona gap
+    mid_y   = (fvg['gap_low'] + fvg['gap_high']) / 2
+    gap_txt = f"{fvg['gap_low']:.3f} – {fvg['gap_high']:.3f} ({fvg['gap_size_pct']:.2f}%)"
+    ax.text(1, mid_y, gap_txt, color=fvg_color, fontsize=8, va='center', alpha=0.9)
+
+    # Asse X: mostra alcune date
+    step = max(1, n // 10)
+    xticks = list(range(0, n, step))
+    ax.set_xticks(xticks)
+    ax.set_xticklabels([dates[i] for i in xticks], rotation=30, ha='right', fontsize=7, color='#8b949e')
+    ax.set_xlim(-1, n)
+
+    ax.legend(loc='upper left', fontsize=7, facecolor='#161b22', labelcolor='#8b949e', framealpha=0.8)
+
+    fvg_em = '🟢 BULLISH' if fvg['type'] == 'BULLISH' else '🔴 BEARISH'
+    ax.set_title(f"{symbol} · 1D · FVG {fvg_em}", color='#e6edf3', fontsize=11, pad=8)
+
+    fig.tight_layout()
+    return fig
+
+
 if __name__ == '__main__':
     main()
