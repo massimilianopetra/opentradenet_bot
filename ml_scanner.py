@@ -1702,12 +1702,15 @@ def _resample_daily_from_data(data: dict) -> list:
     return resample_daily(candles)
 
 
-def detect_fvg(daily_candles: list, current_price: float):
+def detect_fvg(daily_candles: list, current_price: float, min_body_pct: float = 1.0):
     """
     Cerca il FVG più recente attivo nelle ultime 20 candele daily.
 
     FVG BULLISH: daily[i].low > daily[i-2].high  →  gap tra daily[i-2].high e daily[i].low
     FVG BEARISH: daily[i].high < daily[i-2].low  →  gap tra daily[i].high e daily[i-2].low
+
+    La candela centrale [i-1] (impulso) deve avere un body >= min_body_pct%
+    rispetto al suo open. FVG con candela centrale piccola vengono ignorati.
 
     Un FVG è "attivo" se il prezzo non ha ancora attraversato completamente il gap:
       BULLISH attivo: current_price > gap_low
@@ -1721,9 +1724,17 @@ def detect_fvg(daily_candles: list, current_price: float):
 
     start = max(2, n - 20)
     for i in range(n - 1, start - 1, -1):
-        c_curr = daily_candles[i]
-        c_prev = daily_candles[i - 1]   # non usata nella formula, ma è la candela centrale
+        c_curr  = daily_candles[i]
+        c_mid   = daily_candles[i - 1]   # candela di impulso centrale
         c_prev2 = daily_candles[i - 2]
+
+        # Filtro body candela centrale
+        mid_open  = float(c_mid['open'])
+        mid_close = float(c_mid['close'])
+        if mid_open > 0:
+            body_pct = abs(mid_close - mid_open) / mid_open * 100
+            if body_pct < min_body_pct:
+                continue
 
         # BULLISH FVG
         if float(c_curr['low']) > float(c_prev2['high']):
@@ -1760,7 +1771,7 @@ def detect_fvg(daily_candles: list, current_price: float):
     return None
 
 
-def scan_fvg_all(live_prices: dict) -> list:
+def scan_fvg_all(live_prices: dict, min_body_pct: float = 1.0) -> list:
     """
     Itera tutti i simboli disponibili, cerca l'FVG daily più recente attivo
     e ritorna lista di dict {symbol, fvg} ordinata per |distance_pct| crescente.
@@ -1777,7 +1788,7 @@ def scan_fvg_all(live_prices: dict) -> list:
             price = live_prices.get(sym) or (data['closes'][-1] if data['closes'] else None)
             if price is None:
                 continue
-            fvg = detect_fvg(daily, float(price))
+            fvg = detect_fvg(daily, float(price), min_body_pct)
             if fvg is not None:
                 results.append({'symbol': sym, 'fvg': fvg})
         except Exception:
