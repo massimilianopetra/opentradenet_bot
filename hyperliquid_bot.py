@@ -2971,7 +2971,7 @@ async def walletinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 lev_str   = f"{p['leverage']}x {p['lev_type']}"
                 pnl       = p['unrealized']
                 roe_pct   = p['roe'] * 100
-                pnl_sign  = "+" if pnl >= 0 else ""
+                pnl_sign  = "+" if pnl >= 0 else "-"
                 roe_sign  = "+" if roe_pct >= 0 else ""
                 _lp       = monitor.last_prices.get(p['coin'])
                 current_px = _lp[0] if isinstance(_lp, (list, tuple)) else (_lp if isinstance(_lp, float) else None)
