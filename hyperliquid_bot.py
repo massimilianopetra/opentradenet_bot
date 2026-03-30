@@ -1183,11 +1183,11 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── fvg ──────────────────────────────────────────────────────────────────
     if mode == 'fvg':
         symbol       = None
-        min_body_pct = 1.0
+        min_gap_pct = 1.0
         for arg in args[1:]:
             # numero con punto o virgola (e % opzionale) → soglia body%
             try:
-                min_body_pct = float(arg.replace(',', '.').rstrip('%'))
+                min_gap_pct = float(arg.replace(',', '.').rstrip('%'))
                 continue
             except ValueError:
                 pass
@@ -1218,7 +1218,7 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             current_price = float(current_price)
 
             fvg = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: _mls.detect_fvg(daily, current_price, min_body_pct)
+                None, lambda: _mls.detect_fvg(daily, current_price, min_gap_pct)
             )
 
             if fvg is None:
@@ -1280,7 +1280,7 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             live_prices = await _mls.fetch_live_prices()
             results = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: _mls.scan_fvg_all(live_prices, min_body_pct)
+                None, lambda: _mls.scan_fvg_all(live_prices, min_gap_pct)
             )
 
             if not results:

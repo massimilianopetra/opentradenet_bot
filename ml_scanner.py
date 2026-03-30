@@ -1702,15 +1702,15 @@ def _resample_daily_from_data(data: dict) -> list:
     return resample_daily(candles)
 
 
-def detect_fvg(daily_candles: list, current_price: float, min_body_pct: float = 1.0):
+def detect_fvg(daily_candles: list, current_price: float, min_gap_pct: float = 1.0):
     """
     Cerca il FVG più recente attivo nelle ultime 20 candele daily.
 
     FVG BULLISH: daily[i].low > daily[i-2].high  →  gap tra daily[i-2].high e daily[i].low
     FVG BEARISH: daily[i].high < daily[i-2].low  →  gap tra daily[i].high e daily[i-2].low
 
-    La candela centrale [i-1] (impulso) deve avere un body >= min_body_pct%
-    rispetto al suo open. FVG con candela centrale piccola vengono ignorati.
+    Il gap deve essere >= min_gap_pct% rispetto a gap_low.
+    FVG con gap troppo piccolo vengono ignorati.
 
     Un FVG è "attivo" se il prezzo non ha ancora attraversato completamente il gap:
       BULLISH attivo: current_price > gap_low
@@ -1725,23 +1725,16 @@ def detect_fvg(daily_candles: list, current_price: float, min_body_pct: float = 
     start = max(2, n - 20)
     for i in range(n - 1, start - 1, -1):
         c_curr  = daily_candles[i]
-        c_mid   = daily_candles[i - 1]   # candela di impulso centrale
         c_prev2 = daily_candles[i - 2]
-
-        # Filtro body candela centrale
-        mid_open  = float(c_mid['open'])
-        mid_close = float(c_mid['close'])
-        if mid_open > 0:
-            body_pct = abs(mid_close - mid_open) / mid_open * 100
-            if body_pct < min_body_pct:
-                continue
 
         # BULLISH FVG
         if float(c_curr['low']) > float(c_prev2['high']):
             gap_low  = float(c_prev2['high'])
             gap_high = float(c_curr['low'])
+            gap_size_pct = (gap_high - gap_low) / gap_low * 100
+            if gap_size_pct < min_gap_pct:
+                continue
             if current_price > gap_low:   # attivo
-                gap_size_pct = (gap_high - gap_low) / gap_low * 100
                 distance_pct = (current_price - gap_low) / gap_low * 100
                 return {
                     'type':         'BULLISH',
@@ -1756,8 +1749,10 @@ def detect_fvg(daily_candles: list, current_price: float, min_body_pct: float = 
         if float(c_curr['high']) < float(c_prev2['low']):
             gap_low  = float(c_curr['high'])
             gap_high = float(c_prev2['low'])
+            gap_size_pct = (gap_high - gap_low) / gap_low * 100
+            if gap_size_pct < min_gap_pct:
+                continue
             if current_price < gap_high:   # attivo
-                gap_size_pct = (gap_high - gap_low) / gap_low * 100
                 distance_pct = (gap_high - current_price) / current_price * 100
                 return {
                     'type':         'BEARISH',
@@ -1771,7 +1766,7 @@ def detect_fvg(daily_candles: list, current_price: float, min_body_pct: float = 
     return None
 
 
-def scan_fvg_all(live_prices: dict, min_body_pct: float = 1.0) -> list:
+def scan_fvg_all(live_prices: dict, min_gap_pct: float = 1.0) -> list:
     """
     Itera tutti i simboli disponibili, cerca l'FVG daily più recente attivo
     e ritorna lista di dict {symbol, fvg} ordinata per |distance_pct| crescente.
@@ -1788,7 +1783,7 @@ def scan_fvg_all(live_prices: dict, min_body_pct: float = 1.0) -> list:
             price = live_prices.get(sym) or (data['closes'][-1] if data['closes'] else None)
             if price is None:
                 continue
-            fvg = detect_fvg(daily, float(price), min_body_pct)
+            fvg = detect_fvg(daily, float(price), min_gap_pct)
             if fvg is not None:
                 results.append({'symbol': sym, 'fvg': fvg})
         except Exception:
