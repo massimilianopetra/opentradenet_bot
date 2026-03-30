@@ -1722,46 +1722,42 @@ def detect_fvg(daily_candles: list, current_price: float, min_gap_pct: float = 1
     if n < 3:
         return None
 
-    start = max(2, n - 20)
-    for i in range(n - 1, start - 1, -1):
-        c_curr  = daily_candles[i]
-        c_prev2 = daily_candles[i - 2]
+    # Controlla solo il triplet più recente: le ultime 3 candele chiuse
+    i       = n - 1
+    c_curr  = daily_candles[i]
+    c_prev2 = daily_candles[i - 2]
 
-        # BULLISH FVG
-        if float(c_curr['low']) > float(c_prev2['high']):
-            gap_low  = float(c_prev2['high'])
-            gap_high = float(c_curr['low'])
-            gap_size_pct = (gap_high - gap_low) / gap_low * 100
-            if gap_size_pct < min_gap_pct:
-                continue
-            if current_price > gap_low:   # attivo
-                distance_pct = (current_price - gap_low) / gap_low * 100
-                return {
-                    'type':         'BULLISH',
-                    'gap_low':      gap_low,
-                    'gap_high':     gap_high,
-                    'gap_size_pct': gap_size_pct,
-                    'date_formed':  c_curr['date'],
-                    'distance_pct': distance_pct,
-                }
+    # BULLISH FVG
+    if float(c_curr['low']) > float(c_prev2['high']):
+        gap_low      = float(c_prev2['high'])
+        gap_high     = float(c_curr['low'])
+        gap_size_pct = (gap_high - gap_low) / gap_low * 100
+        if gap_size_pct >= min_gap_pct and current_price > gap_low:
+            distance_pct = (current_price - gap_low) / gap_low * 100
+            return {
+                'type':         'BULLISH',
+                'gap_low':      gap_low,
+                'gap_high':     gap_high,
+                'gap_size_pct': gap_size_pct,
+                'date_formed':  c_curr['date'],
+                'distance_pct': distance_pct,
+            }
 
-        # BEARISH FVG
-        if float(c_curr['high']) < float(c_prev2['low']):
-            gap_low  = float(c_curr['high'])
-            gap_high = float(c_prev2['low'])
-            gap_size_pct = (gap_high - gap_low) / gap_low * 100
-            if gap_size_pct < min_gap_pct:
-                continue
-            if current_price < gap_high:   # attivo
-                distance_pct = (gap_high - current_price) / current_price * 100
-                return {
-                    'type':         'BEARISH',
-                    'gap_low':      gap_low,
-                    'gap_high':     gap_high,
-                    'gap_size_pct': gap_size_pct,
-                    'date_formed':  c_curr['date'],
-                    'distance_pct': distance_pct,
-                }
+    # BEARISH FVG
+    if float(c_curr['high']) < float(c_prev2['low']):
+        gap_low      = float(c_curr['high'])
+        gap_high     = float(c_prev2['low'])
+        gap_size_pct = (gap_high - gap_low) / gap_low * 100
+        if gap_size_pct >= min_gap_pct and current_price < gap_high:
+            distance_pct = (gap_high - current_price) / current_price * 100
+            return {
+                'type':         'BEARISH',
+                'gap_low':      gap_low,
+                'gap_high':     gap_high,
+                'gap_size_pct': gap_size_pct,
+                'date_formed':  c_curr['date'],
+                'distance_pct': distance_pct,
+            }
 
     return None
 
