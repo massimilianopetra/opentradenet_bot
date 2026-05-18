@@ -3443,19 +3443,107 @@ async def reloadinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+def _format_info_block(asset_type: str, symbols: list, symbols_info: dict) -> str:
+    emoji_map = {
+        "index":        "📈",
+        "commodity":    "⛏",
+        "forex":        "💱",
+        "etf":          "🌍",
+        "crypto_proxy": "🪙",
+        "stock":        "🏢",
+    }
+    label_map = {
+        "index":        "INDICI",
+        "commodity":    "COMMODITY",
+        "forex":        "FOREX",
+        "etf":          "ETF GEOGRAFICI",
+        "crypto_proxy": "CRYPTO PROXY",
+        "stock":        "AZIONI",
+    }
+    emoji = emoji_map.get(asset_type, "•")
+    label = label_map.get(asset_type, asset_type.upper())
+    lines = [f"{emoji} <b>{label}</b> ({len(symbols)})"]
+    for sym in sorted(symbols):
+        info = symbols_info.get(sym, {})
+        raw_desc = info.get("description", "")
+        short = raw_desc.split("—")[-1].strip() if "—" in raw_desc else raw_desc
+        if len(short) > 38:
+            short = short[:37] + "…"
+        short = short.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        lev  = info.get("max_leverage", "?")
+        disc = info.get("discovery_bound", "?")
+        lines.append(f"  <code>{sym:<8}</code> {short} · {lev}x · {disc}")
+    return "\n".join(lines)
+
+
+async def _info_all(update):
+    order = ["index", "commodity", "forex", "etf", "crypto_proxy", "stock"]
+    groups = {t: [] for t in order}
+    for sym, info in _symbols_info.items():
+        t = info.get("asset_type", "stock")
+        if t in groups:
+            groups[t].append(sym)
+
+    blocks = ["📊 <b>Strumenti disponibili su OpenTradenet</b>\n"]
+    for asset_type in order:
+        syms = groups[asset_type]
+        if not syms:
+            continue
+        blocks.append(_format_info_block(asset_type, syms, _symbols_info))
+
+    blocks.append("\n<i>Usa /info SIMBOLO per i dettagli completi.</i>")
+    blocks.append("<i>Usa /info CATEGORIA per filtrare (es: /info commodity)</i>")
+
+    full_text = "\n\n".join(blocks)
+    chunk = ""
+    for block in full_text.split("\n\n"):
+        candidate = chunk + "\n\n" + block if chunk else block
+        if len(candidate) > 4000:
+            await update.message.reply_text(chunk, parse_mode='HTML')
+            chunk = block
+        else:
+            chunk = candidate
+    if chunk:
+        await update.message.reply_text(chunk, parse_mode='HTML')
+
+
+async def _info_category(asset_type: str, update):
+    syms = [s for s, info in _symbols_info.items() if info.get("asset_type") == asset_type]
+    if not syms:
+        await update.message.reply_text("❌ Nessun simbolo trovato per questa categoria.")
+        return
+    text = _format_info_block(asset_type, syms, _symbols_info)
+    text += "\n\n<i>Usa /info SIMBOLO per i dettagli completi.</i>"
+    await update.message.reply_text(text, parse_mode='HTML')
+
+
 async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    _category_map = {
+        "index":        "index",
+        "indici":       "index",
+        "commodity":    "commodity",
+        "commodities":  "commodity",
+        "forex":        "forex",
+        "etf":          "etf",
+        "crypto":       "crypto_proxy",
+        "crypto_proxy": "crypto_proxy",
+        "stock":        "stock",
+        "stocks":       "stock",
+        "azioni":       "stock",
+    }
+
     if not context.args:
-        await update.message.reply_text(
-            "ℹ️ <b>Uso:</b> /info SIMBOLO\n\n"
-            "Mostra informazioni dettagliate su un simbolo dal database.\n\n"
-            "Esempi:\n"
-            "  /info HYUNDAI\n"
-            "  /info CL  (alias di WTIOIL)",
-            parse_mode='HTML'
-        )
+        await _info_all(update)
         return
 
-    query = context.args[0].upper()
+    arg = context.args[0].upper()
+
+    cat = _category_map.get(arg.lower())
+    if cat is not None:
+        await _info_category(cat, update)
+        return
+
+    query = arg
 
     # Cerca prima per chiave diretta
     info = _symbols_info.get(query)
@@ -3473,7 +3561,9 @@ async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if info is None:
         await update.message.reply_text(
             f"❌ <b>{query}</b> non trovato nel database.\n\n"
-            "Controlla il nome del simbolo o prova con un alias diverso.",
+            "Controlla il nome del simbolo o prova con un alias diverso.\n\n"
+            "Categorie valide: <code>index</code> · <code>commodity</code> · "
+            "<code>forex</code> · <code>etf</code> · <code>crypto</code> · <code>stock</code>",
             parse_mode='HTML'
         )
         return
