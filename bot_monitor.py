@@ -263,13 +263,15 @@ class HyperliquidPriceMonitor:
         return self.subscribers.get(chat_id, set())
 
     def get_all_monitored_symbols(self) -> Set[str]:
-        """Tutti i simboli attualmente monitorati (subscribe + ordini condizionali)."""
+        """Tutti i simboli attualmente monitorati (subscribe + ordini condizionali + posizioni aperte)."""
         result: Set[str] = set()
         for syms in self.subscribers.values():
             result.update(syms)
         for conds in self.conditional_orders.values():
             for o in conds.values():
                 result.add(o['coin'])
+        for tracks in self.position_tracks.values():
+            result.update(tracks.keys())
         return result
 
     # ---------------------------------------------------------------------------
