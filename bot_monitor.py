@@ -105,11 +105,12 @@ class HyperliquidPriceMonitor:
 
         # ML Scanner
         self.scanner_enabled:      bool = False
-        self.scanner_min_score:    int  = 60
-        self.scanner_chat_ids:     set  = set()   # deprecato, mantenuto per compatibilità
-        self.scanner_mode:         str  = 'vsa'   # 'vsa' | 'volume'
-        # daemon per-utente: {chat_id: {'mode': 'vsa'|'volume'|'pattern', 'min_score': int}}
-        self.scanner_subscribers:  dict = {}
+        self.scanner_min_score:    int  = 60   # fallback/default globale, usato se un plugin non ha soglia esplicita
+        self.scanner_chat_ids:     set  = set()   # chat_id a cui inviare gli alert del daemon
+        # Plugin attivi nel daemon (es. {'vsa', 'volume'}) — sostituisce il vecchio scanner_mode singolo
+        self.scanner_active_plugins: set = set()
+        # Soglia individuale per plugin: {'vsa': 75, 'volume': 60, ...}
+        self.scanner_thresholds:   dict = {}
 
         # Stop Loss nativi: {chat_id: {symbol: {oid, dex, trigger_px, is_long}}}
         self.native_sl_orders: dict = {}

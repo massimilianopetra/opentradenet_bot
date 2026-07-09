@@ -4,7 +4,9 @@ bot_tasks.py — Background task asincroni per OpenTradeNet bot
 Contiene i loop che girano in background, estratti da hyperliquid_bot.py:
   - price_polling_task      : alert subscribe, position alert, ordini condizionali, spike, snapshot
   - position_tracking_task  : rileva apertura/chiusura/modifica posizioni
-  - candle_task             : fetch e salvataggio candele 15m + trigger scanner
+  - candle_task             : fetch e salvataggio candele 15m
+  - scanner_daemon_task     : check periodico dei plugin ML scanner (ml_scanner.SCANNER_PLUGINS)
+                              sulla candela live, indipendente dalla chiusura candela 15m
 
 Inizializzazione obbligatoria prima di lanciare i task:
     from bot_tasks import init_tasks, TaskContext
@@ -783,7 +785,7 @@ async def position_tracking_task(application) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Task 3 — Candele 15m + trigger scanner daemon
+# Task 3 — Candele 15m
 # ---------------------------------------------------------------------------
 
 def _sleep_until_next_candle(offset_secs: int = 30) -> float:
@@ -801,7 +803,9 @@ async def candle_task(application) -> None:
     Ogni CANDLES_INTERVAL_SECS:
       - Fetcha le ultime candele 15m per tutti i simboli (xyz + SPIKE_EXTRA_SYMBOLS)
       - Salva su CSV in data/candles/
-      - Se scanner daemon attivo, esegue una scansione e invia alert
+
+    Solo scrittura candele: il trigger dello scanner daemon vive in
+    scanner_daemon_task, disaccoppiato dal ciclo di chiusura candela.
     """
     c       = _ctx.c
     h       = _ctx.h
@@ -852,79 +856,133 @@ async def candle_task(application) -> None:
                 + (f" ({errors} errori)" if errors else "")
             )
 
-            # Trigger scanner daemon (se ci sono utenti iscritti)
-            if monitor.scanner_enabled and monitor.scanner_subscribers:
-                try:
-                    from collections import defaultdict
-
-                    # Raggruppa utenti per modalità (ogni modalità scansionata una sola volta)
-                    by_mode: dict = defaultdict(list)
-                    for cid, cfg in monitor.scanner_subscribers.items():
-                        by_mode[cfg['mode']].append((cid, cfg['min_score']))
-
-                    for scan_mode, users in by_mode.items():
-
-                        if scan_mode == 'volume':
-                            results = await asyncio.get_event_loop().run_in_executor(
-                                None, lambda: _mls.scan_volume(top_n=10)
-                            )
-                            if results:
-                                t = datetime.now(timezone.utc).replace(tzinfo=None).strftime('%H:%M')
-                                lines = [f"📊 <b>Volume Spike Daemon</b> [{t}]\n"]
-                                for r in results[:10]:
-                                    usd = r.get('last_volume_usd', 0)
-                                    if usd >= 1_000_000:
-                                        usd_fmt = f"${usd/1_000_000:.2f}M"
-                                    elif usd >= 1_000:
-                                        usd_fmt = f"${usd/1_000:.1f}K"
-                                    else:
-                                        usd_fmt = f"${usd:.2f}"
-                                    vol_fmt = f"{r['last_volume']:,.0f}" if r['last_volume'] >= 1 else f"{r['last_volume']:.4f}"
-                                    em = "🔴" if r['ratio'] > 3 else ("🟡" if r['ratio'] > 1.5 else "⚪")
-                                    lines.append(f"{em} <b>{r['symbol']}</b>  x{r['ratio']:.2f}  {vol_fmt} ({usd_fmt})")
-                                msg = "\n".join(lines)
-                                for (cid, _) in users:
-                                    try:
-                                        await application.bot.send_message(chat_id=cid, text=msg, parse_mode='HTML')
-                                    except Exception as e:
-                                        logger.error(f"Errore invio volume daemon a {cid}: {e}")
-                            logger.info(f"📊 Volume daemon: {len(results)} spike, {len(users)} utenti")
-
-                        elif scan_mode == 'pattern':
-                            results = await asyncio.get_event_loop().run_in_executor(
-                                None, lambda: _mls.scan_patterns_top(10)
-                            )
-                            for r in results:
-                                msg = _mls.format_pattern_alert(r)
-                                for (cid, _) in users:
-                                    try:
-                                        await application.bot.send_message(
-                                            chat_id=cid, text=msg, parse_mode='HTML'
-                                        )
-                                    except Exception as e:
-                                        logger.error(f"Errore invio pattern daemon a {cid}: {e}")
-                            logger.info(f"🕯 Pattern daemon: {len(results)} alert, {len(users)} utenti")
-
-                        else:
-                            # VSA — scan unico, poi filtra per soglia per-utente
-                            symbols = _mls.discover_symbols()
-                            all_results = await _mls.scan_vsa_results(symbols)
-                            for (cid, min_score) in users:
-                                filtered = [r for r in all_results if r.get('score', 0) >= min_score]
-                                for r in filtered:
-                                    try:
-                                        msg = _mls.format_alert(r)
-                                        await application.bot.send_message(
-                                            chat_id=cid, text=msg, parse_mode='HTML'
-                                        )
-                                    except Exception as e:
-                                        logger.error(f"Errore invio VSA daemon a {cid}: {e}")
-                            logger.info(f"🧠 VSA daemon: scan completato, {len(users)} utenti")
-
-                except Exception as e:
-                    logger.error(f"Errore scanner daemon: {e}", exc_info=True)
-
         except Exception as e:
             logger.error(f"Errore nel candle task: {e}", exc_info=True)
 
         await asyncio.sleep(_sleep_until_next_candle(offset_secs=30))
+
+
+# ---------------------------------------------------------------------------
+# Task 4 — Scanner daemon (plugin-based, indipendente dalla chiusura candela)
+# ---------------------------------------------------------------------------
+
+async def scanner_daemon_task(application) -> None:
+    """
+    Ogni SCANNER_DAEMON_INTERVAL_SECS:
+      - Se monitor.scanner_enabled, per ogni simbolo scoperto carica le candele
+        chiuse (load_last_candles/LOOKBACK) e le arricchisce con la candela live
+        (stessa logica di fetch_live_candle + append_live_candle usata da /chart).
+      - Per ogni plugin in monitor.scanner_active_plugins chiama plugin.compute()
+        e, se il risultato supera monitor.scanner_thresholds[plugin.name], invia
+        plugin.format_alert(result) a tutti i chat_id in monitor.scanner_chat_ids.
+    """
+    c       = _ctx.c
+    h       = _ctx.h
+    monitor = _ctx.monitor
+    _mls    = h['_mls']
+
+    SCANNER_DAEMON_INTERVAL_SECS = c['SCANNER_DAEMON_INTERVAL_SECS']
+    fetch_live_candle            = h['fetch_live_candle']
+    append_live_candle           = h['append_live_candle']
+
+    logger.info(f"📡 Task scanner daemon avviato (ogni {SCANNER_DAEMON_INTERVAL_SECS}s)")
+
+    while True:
+        await asyncio.sleep(SCANNER_DAEMON_INTERVAL_SECS)
+
+        try:
+            if not (monitor.scanner_enabled and monitor.scanner_active_plugins
+                    and monitor.scanner_chat_ids):
+                continue
+
+            plugins = [
+                _mls.SCANNER_PLUGINS[name]
+                for name in monitor.scanner_active_plugins
+                if name in _mls.SCANNER_PLUGINS
+            ]
+            if not plugins:
+                continue
+
+            symbols = _mls.discover_symbols()
+
+            all_prices, funding_map = await asyncio.gather(
+                monitor.fetch_all_prices(),
+                _mls._fetch_all_funding_rates(),
+            )
+            xyz_set = {
+                sym for sym, (_, _, dex) in all_prices.items()
+                if dex and dex.upper() == 'XYZ'
+            }
+
+            def _load_and_enrich(sym: str):
+                data = _mls.load_last_candles(sym, _mls.LOOKBACK)
+                if data is None:
+                    return None
+                data['symbol'] = sym
+                return data
+
+            for sym in symbols:
+                candles = await asyncio.get_event_loop().run_in_executor(
+                    None, _load_and_enrich, sym
+                )
+                if candles is None:
+                    continue
+
+                is_xyz    = sym in xyz_set
+                live_ohlc = await fetch_live_candle(sym, is_xyz=is_xyz)
+                if live_ohlc is not None:
+                    candles = append_live_candle(candles, live_ohlc)
+                    candles['symbol'] = sym
+                else:
+                    fallback = monitor.last_prices.get(sym)
+                    if not fallback:
+                        try:
+                            gp = await monitor.get_price(sym)
+                            if gp:
+                                fallback = gp[0]
+                        except Exception:
+                            pass
+                    if fallback:
+                        candles = append_live_candle(candles, float(fallback))
+                        candles['symbol'] = sym
+
+                live_price   = all_prices.get(sym, (None,))[0]
+                funding_rate = funding_map.get(sym.upper())
+
+                for plugin in plugins:
+                    try:
+                        result = await asyncio.get_event_loop().run_in_executor(
+                            None, plugin.compute, sym, candles, live_price, funding_rate
+                        )
+                    except Exception as e:
+                        logger.error(f"Errore compute plugin {plugin.name} {sym}: {e}")
+                        continue
+
+                    if result is None:
+                        continue
+
+                    threshold = monitor.scanner_thresholds.get(plugin.name, plugin.default_min_score)
+                    if result['score'] < threshold:
+                        continue
+
+                    try:
+                        msg = plugin.format_alert(result)
+                    except Exception as e:
+                        logger.error(f"Errore format_alert plugin {plugin.name} {sym}: {e}")
+                        continue
+
+                    for cid in list(monitor.scanner_chat_ids):
+                        try:
+                            await application.bot.send_message(
+                                chat_id=cid, text=msg, parse_mode='HTML'
+                            )
+                        except Exception as e:
+                            logger.error(f"Errore invio {plugin.name} daemon a {cid}: {e}")
+
+            logger.info(
+                f"📡 Scanner daemon: ciclo completato — plugin={sorted(monitor.scanner_active_plugins)} "
+                f"simboli={len(symbols)} utenti={len(monitor.scanner_chat_ids)}"
+            )
+
+        except Exception as e:
+            logger.error(f"Errore nello scanner daemon task: {e}", exc_info=True)

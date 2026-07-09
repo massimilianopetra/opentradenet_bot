@@ -186,64 +186,6 @@ def discover_symbols():
     return sorted(symbols)
 
 
-def scan_volume(top_n: int = 10) -> list:
-    """
-    Calcola per ogni simbolo il ratio ultimo_volume / media_20_candele_precedenti.
-    Ritorna lista di dict ordinata per ratio decrescente, troncata a top_n.
-
-    Dict keys: 'symbol', 'ratio', 'last_volume', 'avg_volume'
-    """
-    results = []
-    for sym in discover_symbols():
-        data = load_last_candles(sym, 21)
-        if data is None:
-            continue
-        vols = data['volumes']
-        if len(vols) < 2:
-            continue
-        last_vol   = vols[-1]
-        last_close = data['closes'][-1]
-        prev       = vols[-21:-1]           # fino a 20 candele precedenti
-        avg_vol    = sum(prev) / len(prev) if prev else 0.0
-        if avg_vol == 0:
-            continue
-        results.append({
-            'symbol':          sym,
-            'ratio':           last_vol / avg_vol,
-            'last_volume':     last_vol,
-            'avg_volume':      avg_vol,
-            'last_volume_usd': last_vol * last_close,
-        })
-    results.sort(key=lambda r: r['ratio'], reverse=True)
-    return results[:top_n]
-
-
-def scan_vsa_top(top_n: int = 10) -> list:
-    """
-    Calcola lo score VSA su tutti i simboli disponibili e ritorna i top_n
-    ordinati per score decrescente. Non usa prezzi live né funding rates
-    (solo dati candele) per restare sincrono e veloce.
-
-    Dict keys: 'symbol', 'score', 'direction', 'patterns'
-    """
-    results = []
-    for sym in discover_symbols():
-        data = load_last_candles(sym, LOOKBACK)
-        if data is None:
-            continue
-        result = compute_opportunity(data)
-        if result:
-            results.append({
-                'symbol':    sym,
-                'score':     result['score'],
-                'direction': result['direction'],
-                'patterns':  result['patterns'],
-                'price':     result['price'],
-            })
-    results.sort(key=lambda r: r['score'], reverse=True)
-    return results[:top_n]
-
-
 # ---------------------------------------------------------------------------
 # 1b. PREZZI LIVE HYPERLIQUID
 # ---------------------------------------------------------------------------
@@ -1123,33 +1065,6 @@ async def send_telegram(message, chat_ids):
 # 8. SCAN
 # ---------------------------------------------------------------------------
 
-async def scan_vsa_results(symbols: list) -> list:
-    """
-    Esegue lo scan VSA su tutti i simboli e ritorna la lista grezza dei risultati
-    senza filtrare per soglia e senza inviare nulla.
-    Usato dal daemon per-utente in bot_tasks.py: ogni utente filtra con la sua min_score.
-    Ritorna lista di dict ordinata per score decrescente.
-    """
-    live_prices, funding_map = await asyncio.gather(
-        fetch_live_prices(),
-        _fetch_all_funding_rates(),
-    )
-    results = []
-    for sym in symbols:
-        if not is_market_open(sym):
-            continue
-        data = load_last_candles(sym, LOOKBACK)
-        if data is None:
-            continue
-        live_price   = live_prices.get(sym)
-        funding_rate = funding_map.get(sym.upper())
-        result = compute_opportunity(data, live_price=live_price, funding_rate=funding_rate)
-        if result:
-            results.append(result)
-    results.sort(key=lambda r: r['score'], reverse=True)
-    return results
-
-
 async def run_scan(symbols, min_score, dry_run, chat_ids, verbose=True, notify_empty=False):
     if verbose:
         t = datetime.now(timezone.utc).replace(tzinfo=None).strftime('%Y-%m-%d %H:%M UTC')
@@ -1560,42 +1475,22 @@ def detect_candle_patterns(data: dict) -> list:
     return patterns
 
 
-def scan_patterns_top(top_n: int = 10) -> list:
-    """
-    Scansiona tutti i simboli disponibili e restituisce i top_n per punteggio
-    di pattern candlestick (somma della strength di tutti i pattern trovati).
-
-    Dict keys: 'symbol', 'patterns', 'strength', 'price'
-    """
-    results = []
-    for sym in discover_symbols():
-        data = load_last_candles(sym, 20)
-        if data is None:
-            continue
-        pattern_data = {
-            'open':  data['opens'],
-            'high':  data['highs'],
-            'low':   data['lows'],
-            'close': data['closes'],
-        }
-        pats = detect_candle_patterns(pattern_data)
-        if not pats:
-            continue
-        total_strength = sum(p['strength'] for p in pats)
-        results.append({
-            'symbol':   sym,
-            'patterns': pats,
-            'strength': total_strength,
-            'price':    data['closes'][-1],
-        })
-    results.sort(key=lambda r: r['strength'], reverse=True)
-    return results[:top_n]
+def _pattern_dominant(patterns: list) -> tuple:
+    """Direzione dominante (somma strength) di una lista di pattern candlestick."""
+    long_str  = sum(p['strength'] for p in patterns if p['direction'] == 'LONG')
+    short_str = sum(p['strength'] for p in patterns if p['direction'] == 'SHORT')
+    if long_str > short_str:
+        return 'LONG', '📈'
+    elif short_str > long_str:
+        return 'SHORT', '📉'
+    else:
+        return 'NEUTRAL', '➡️'
 
 
 def format_pattern_alert(r: dict) -> str:
     """
     Formatta un messaggio HTML per Telegram a partire da un risultato
-    di scan_patterns_top.
+    di PatternPlugin.compute().
     """
     sym      = r['symbol']
     price    = r['price']
@@ -1609,18 +1504,7 @@ def format_pattern_alert(r: dict) -> str:
     else:
         p_fmt = f"${price:.6f}"
 
-    # Direzione dominante
-    long_str  = sum(p['strength'] for p in patterns if p['direction'] == 'LONG')
-    short_str = sum(p['strength'] for p in patterns if p['direction'] == 'SHORT')
-    if long_str > short_str:
-        dominant = 'LONG'
-        dom_em   = '📈'
-    elif short_str > long_str:
-        dominant = 'SHORT'
-        dom_em   = '📉'
-    else:
-        dominant = 'NEUTRAL'
-        dom_em   = '➡️'
+    dominant, dom_em = _pattern_dominant(patterns)
 
     lines = [
         f"🕯 <b>{sym}</b>  {dom_em} {dominant}  —  {p_fmt}",
@@ -1638,7 +1522,196 @@ def format_pattern_alert(r: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 8. FAIR VALUE GAP (FVG) — Daily
+# 8. SCANNER PLUGIN — interfaccia comune per daemon + scan manuale
+# ---------------------------------------------------------------------------
+# Ogni plugin incapsula UNA modalità di scan (vsa/volume/pattern/...). compute()
+# non applica alcun filtro di soglia — quello è responsabilità del chiamante
+# (scanner_daemon_task in bot_tasks.py oppure scan_command in hyperliquid_bot.py),
+# così che aggiungere un nuovo plugin richieda solo di implementare questa
+# interfaccia e registrarla in SCANNER_PLUGINS.
+
+class ScannerPlugin:
+    name: str = ''
+    label: str = ''
+    default_min_score: float = 0
+
+    def compute(self, symbol: str, candles: dict, live_price: float = None,
+                funding_rate: float = None) -> dict | None:
+        """
+        Calcola SEMPRE il risultato con lo score (anche sotto soglia).
+        Ritorna None solo se mancano dati sufficienti per calcolare (o se
+        il calcolo non produce alcun segnale, stesso caso in cui oggi le
+        funzioni equivalenti ritornano None).
+        """
+        raise NotImplementedError
+
+    def format_alert(self, result: dict) -> str:
+        """Messaggio HTML completo per l'alert automatico del daemon."""
+        raise NotImplementedError
+
+    def format_compact(self, result: dict) -> str:
+        """Riga compatta per le liste top-N (`/scan <plugin> [N]`)."""
+        raise NotImplementedError
+
+    def format_mini(self, candles: dict, live_price: float = None,
+                     funding_rate: float = None) -> str:
+        """Mini analisi per un singolo simbolo sotto soglia (`/scan SYM`)."""
+        raise NotImplementedError
+
+
+class VsaPlugin(ScannerPlugin):
+    name  = 'vsa'
+    label = '🧠 VSA score'
+    default_min_score = DEFAULT_MIN_SCORE
+
+    def compute(self, symbol, candles, live_price=None, funding_rate=None):
+        return compute_opportunity(candles, live_price=live_price, funding_rate=funding_rate)
+
+    def format_alert(self, result):
+        return format_alert(result)
+
+    def format_compact(self, result):
+        score = result['score']
+        dirn  = result['direction']
+        if score >= 75:
+            em = "🔴" if dirn == 'SHORT' else "🟢"
+        elif score >= 55:
+            em = "🟡"
+        else:
+            em = "⚪"
+        dir_em = "📈" if dirn == 'LONG' else "📉"
+        bar    = '🟩' * (score // 20) + '⬜' * (5 - score // 20)
+        pnames = ' · '.join(p['name'] for p in result['patterns'][:2])
+        price  = result.get('price', 0)
+        p_fmt  = f"${price:,.4f}" if price < 1 else f"${price:,.2f}"
+        return (
+            f"{em} *{result['symbol']}*  {dir_em} {dirn}  *{score}/100*\n"
+            f"   {bar}  {p_fmt}  _{pnames}_"
+        )
+
+    def format_mini(self, candles, live_price=None, funding_rate=None):
+        return format_mini_analysis(candles, live_price=live_price, funding_rate=funding_rate)
+
+
+class VolumePlugin(ScannerPlugin):
+    name  = 'volume'
+    label = '📊 Volume spike'
+    default_min_score = 1.5
+
+    def compute(self, symbol, candles, live_price=None, funding_rate=None):
+        vols = candles['volumes']
+        if len(vols) < 2:
+            return None
+        last_vol   = vols[-1]
+        last_close = candles['closes'][-1]
+        prev       = vols[-21:-1]           # fino a 20 candele precedenti
+        avg_vol    = sum(prev) / len(prev) if prev else 0.0
+        if avg_vol == 0:
+            return None
+        ratio = last_vol / avg_vol
+        return {
+            'symbol':          symbol,
+            'score':           ratio,
+            'ratio':           ratio,
+            'last_volume':     last_vol,
+            'avg_volume':      avg_vol,
+            'last_volume_usd': last_vol * last_close,
+        }
+
+    @staticmethod
+    def _fmt_ratio_em(ratio: float) -> str:
+        return "🔴" if ratio > 3 else ("🟡" if ratio > 1.5 else "⚪")
+
+    @staticmethod
+    def _fmt_vol_usd(result: dict) -> tuple:
+        last_volume = result['last_volume']
+        vol_fmt = f"{last_volume:,.0f}" if last_volume >= 1 else f"{last_volume:.4f}"
+        usd = result.get('last_volume_usd', 0)
+        if usd >= 1_000_000:
+            usd_fmt = f"${usd/1_000_000:.2f}M"
+        elif usd >= 1_000:
+            usd_fmt = f"${usd/1_000:.1f}K"
+        else:
+            usd_fmt = f"${usd:.2f}"
+        return vol_fmt, usd_fmt
+
+    def format_alert(self, result):
+        ratio = result['ratio']
+        em = self._fmt_ratio_em(ratio)
+        vol_fmt, usd_fmt = self._fmt_vol_usd(result)
+        t = datetime.now(timezone.utc).replace(tzinfo=None).strftime('%H:%M')
+        return (
+            f"📊 <b>Volume Spike</b> [{t}]\n"
+            f"{em} <b>{result['symbol']}</b>  x{ratio:.2f}  vol={vol_fmt} ({usd_fmt})"
+        )
+
+    def format_compact(self, result):
+        ratio = result['ratio']
+        em = self._fmt_ratio_em(ratio)
+        vol_fmt, usd_fmt = self._fmt_vol_usd(result)
+        return f"{em} *{result['symbol']}*  x{ratio:.2f}  vol={vol_fmt} ({usd_fmt})"
+
+    def format_mini(self, candles, live_price=None, funding_rate=None):
+        result = self.compute(candles['symbol'], candles, live_price, funding_rate)
+        if result is None:
+            return f"📋 <b>{candles['symbol']}</b> — dati volume insufficienti."
+        return f"📋 <b>{result['symbol']}</b>  —  mini analisi volume\n{self.format_compact(result)}"
+
+
+class PatternPlugin(ScannerPlugin):
+    name  = 'pattern'
+    label = '🕯 Pattern candlestick'
+    default_min_score = 3
+
+    def compute(self, symbol, candles, live_price=None, funding_rate=None):
+        pattern_data = {
+            'open':  candles['opens'],
+            'high':  candles['highs'],
+            'low':   candles['lows'],
+            'close': candles['closes'],
+        }
+        pats = detect_candle_patterns(pattern_data)
+        if not pats:
+            return None
+        total_strength = sum(p['strength'] for p in pats)
+        price = live_price if live_price else candles['closes'][-1]
+        return {
+            'symbol':   symbol,
+            'score':    total_strength,
+            'strength': total_strength,
+            'patterns': pats,
+            'price':    price,
+        }
+
+    def format_alert(self, result):
+        return format_pattern_alert(result)
+
+    def format_compact(self, result):
+        dominant, dom_em = _pattern_dominant(result['patterns'])
+        pnames = ' · '.join(p['name'] for p in result['patterns'][:2])
+        price  = result.get('price', 0)
+        p_fmt  = f"${price:,.4f}" if price < 1 else f"${price:,.2f}"
+        return (
+            f"🕯 *{result['symbol']}*  {dom_em} {dominant}  *str={result['strength']}*\n"
+            f"   {p_fmt}  _{pnames}_"
+        )
+
+    def format_mini(self, candles, live_price=None, funding_rate=None):
+        result = self.compute(candles['symbol'], candles, live_price, funding_rate)
+        if result is None:
+            return f"📋 <b>{candles['symbol']}</b> — nessun pattern candlestick rilevato."
+        return f"📋 <b>{result['symbol']}</b>  —  mini analisi pattern\n{self.format_compact(result)}"
+
+
+SCANNER_PLUGINS: dict = {
+    'vsa':     VsaPlugin(),
+    'volume':  VolumePlugin(),
+    'pattern': PatternPlugin(),
+}
+
+
+# ---------------------------------------------------------------------------
+# 9. FAIR VALUE GAP (FVG) — Daily
 # ---------------------------------------------------------------------------
 
 def resample_daily(candles_15m: list) -> list:

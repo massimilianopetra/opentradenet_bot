@@ -22,7 +22,7 @@ from bot_monitor import HyperliquidPriceMonitor, MonitorConfig
 import importlib, ml_scanner as _mls
 import ml_analyst
 import ml_journal
-from bot_tasks import init_tasks, TaskContext, price_polling_task, position_tracking_task, candle_task
+from bot_tasks import init_tasks, TaskContext, price_polling_task, position_tracking_task, candle_task, scanner_daemon_task
 
 # ---------------------------------------------------------------------------
 # Configurazione ambiente
@@ -97,6 +97,7 @@ PRICES_DIR    = Path(os.getenv('PRICES_DIR', 'data/prices'))
 COND_DIR      = Path(os.getenv('COND_DIR',   'data/conditional_orders'))
 CANDLES_DIR   = Path(os.getenv('CANDLES_DIR', 'data/candles'))
 CANDLES_INTERVAL_SECS = int(os.getenv('CANDLES_INTERVAL_SECS', '900'))
+SCANNER_DAEMON_INTERVAL_SECS = int(os.getenv('SCANNER_DAEMON_INTERVAL_SECS', '300'))
 PRICES_TIME   = int(os.getenv('PRICES_TIME', '9'))
 
 POSITION_TRACK_INTERVAL = int(os.getenv('POSITION_TRACK_INTERVAL', '300'))
@@ -227,9 +228,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/cancelcond ID|SYM|all     — cancella ordine condizionale\n"
         "/chart SYM [N] [TF]       — grafico candele (es: /chart GOLD 72 1H)\n"
         "/analyze SYM              — analisi tecnica AI daily+15m con setup suggerito\n"
-        "/scan                     — scanner (tutte le modalità)\n"
+        "/scan                     — scanner (tutti i plugin: vsa/volume/pattern)\n"
         "/scan volume [N]          — top N spike di volume 15m\n"
-        "/scan daemon [SCORE]      — scan VSA automatico\n"
+        "/scan daemon [plugin:soglia,...] — scan automatico ogni 5m (def. vsa)\n"
         "/scan [SYM] [SCORE]       — scan VSA manuale\n"
         "/scanstop                 — ferma scan automatico\n"
         "/scanstatus               — stato scanner\n"
@@ -977,17 +978,22 @@ def save_candles(symbol: str, candles: list) -> int:
     return written
 
 _SCAN_HELP = (
-    "📡 *Scanner* — modalità disponibili:\n\n"
-    "`/scan vsa [N]`        — top N simboli per score VSA (def. 10)\n"
-    "`/scan volume [N]`     — top N spike di volume su 15m (def. 10)\n"
-    "`/scan pattern [N]`    — top N simboli per pattern candlestick (def. 10)\n"
-    "`/scan fvg`            — FVG daily su tutti i simboli\n"
-    "`/scan fvg SIMBOLO`    — FVG daily dettagliato con grafico\n"
-    "`/scan daemon vsa [SCORE]`    — alert VSA automatico ogni 15m (def.)\n"
-    "`/scan daemon volume [SCORE]` — alert volume spike automatico ogni 15m\n"
-    "`/scan daemon pattern`        — alert pattern candlestick automatico ogni 15m\n"
-    "`/scan oi`             — _coming soon_\n"
-    "`/scan [SYM] [SCORE]`  — scan VSA manuale (tutti o un simbolo)\n"
+    "📡 *Scanner* — comando generico sul registry dei plugin:\n\n"
+    "`/scan <plugin> [N]`     — top N simboli per il plugin (def. 10)\n"
+    "   Plugin disponibili: `vsa`, `volume`, `pattern`\n"
+    "   Es: `/scan vsa 5`  `/scan volume 5`  `/scan pattern 5`\n"
+    "`/scan pattern SIMBOLO`  — pattern candlestick con grafico annotato\n"
+    "`/scan fvg`              — FVG daily su tutti i simboli\n"
+    "`/scan fvg SIMBOLO`      — FVG daily dettagliato con grafico\n"
+    "`/scan oi`               — _coming soon_\n"
+    "`/scan [SYM] [SCORE]`    — scan VSA manuale (tutti o un simbolo)\n\n"
+    f"*Daemon automatico* — check ogni {SCANNER_DAEMON_INTERVAL_SECS // 60} minuti sulla "
+    "candela live (non solo alla chiusura della candela 15m):\n"
+    "`/scan daemon`  — attiva solo VSA con la soglia corrente (retrocompatibile)\n"
+    "`/scan daemon vsa:75,volume:60,pattern:50`  — plugin con soglie individuali\n"
+    "`/scan daemon vsa,volume`  — soglie di default dei plugin\n"
+    "`/scanstop`    — ferma il daemon per te\n"
+    "`/scanstatus`  — stato del daemon e dei plugin attivi\n"
     "\nEs: `/scan vsa 5`  `/scan volume 5`  `/scan pattern 5`  `/scan fvg`  `/scan fvg BTC`  `/scan BTC`  `/scan 70`"
 )
 
@@ -1007,91 +1013,15 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     mode = args[0].lower()
 
-    # ── vsa ──────────────────────────────────────────────────────────────────
-    if mode == 'vsa':
-        top_n = 10
-        if len(args) > 1 and args[1].isdigit():
-            top_n = max(1, int(args[1]))
-
-        await update.message.reply_text(f"🔍 Calcolo score VSA su {len(_mls.discover_symbols())} simboli...")
-        results = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: _mls.scan_vsa_top(top_n)
-        )
-        if not results:
-            await update.message.reply_text("📭 Nessun segnale VSA trovato.")
-            return
-
-        lines = [f"🧠 *Top {top_n} VSA Score* — 15m\n"]
-        for r in results:
-            score = r['score']
-            dirn  = r['direction']
-            if score >= 75:
-                em = "🔴" if dirn == 'SHORT' else "🟢"
-            elif score >= 55:
-                em = "🟡"
-            else:
-                em = "⚪"
-            dir_em  = "📈" if dirn == 'LONG' else "📉"
-            bar     = '🟩' * (score // 20) + '⬜' * (5 - score // 20)
-            pnames  = ' · '.join(p['name'] for p in r['patterns'][:2])
-            price   = r.get('price', 0)
-            p_fmt   = f"${price:,.4f}" if price < 1 else f"${price:,.2f}"
-            lines.append(
-                f"{em} *{r['symbol']}*  {dir_em} {dirn}  *{score}/100*\n"
-                f"   {bar}  {p_fmt}  _{pnames}_"
-            )
-
-        await update.message.reply_text("\n".join(lines), parse_mode='Markdown')
-        return
-
-    # ── volume ───────────────────────────────────────────────────────────────
-    if mode == 'volume':
-        top_n = 10
-        if len(args) > 1 and args[1].isdigit():
-            top_n = max(1, int(args[1]))
-
-        await update.message.reply_text(f"🔍 Analisi volume su {len(_mls.discover_symbols())} simboli...")
-        results = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: _mls.scan_volume(top_n)
-        )
-        if not results:
-            await update.message.reply_text("📭 Nessun dato disponibile.")
-            return
-
-        lines = [f"📊 *Top {top_n} Volume Spike* — 15m\n"]
-        for r in results:
-            ratio = r['ratio']
-            if ratio > 3:
-                em = "🔴"
-            elif ratio > 1.5:
-                em = "🟡"
-            else:
-                em = "⚪"
-            vol_fmt = f"{r['last_volume']:,.0f}" if r['last_volume'] >= 1 else f"{r['last_volume']:.4f}"
-            usd = r.get('last_volume_usd', 0)
-            if usd >= 1_000_000:
-                usd_fmt = f"${usd/1_000_000:.2f}M"
-            elif usd >= 1_000:
-                usd_fmt = f"${usd/1_000:.1f}K"
-            else:
-                usd_fmt = f"${usd:.2f}"
-            lines.append(f"{em} *{r['symbol']}*  x{ratio:.2f}  vol={vol_fmt} ({usd_fmt})")
-
-        await update.message.reply_text("\n".join(lines), parse_mode='Markdown')
-        return
-
-    # ── pattern ──────────────────────────────────────────────────────────────
+    # ── pattern SIMBOLO: scan singolo con chart annotato (caso speciale) ──────
     if mode == 'pattern':
-        top_n  = 10
-        symbol = None
+        _symbol = None
         for arg in args[1:]:
-            if arg.isdigit():
-                top_n = max(1, int(arg))
-            elif arg.lower() not in ('pattern',):
-                symbol = arg.upper()
+            if not arg.isdigit() and arg.lower() not in ('pattern',):
+                _symbol = arg.upper()
 
-        if symbol:
-            # ── Scan singolo simbolo con chart annotato ───────────────────────
+        if _symbol:
+            symbol = _symbol
             await update.message.reply_text(
                 f"🔍 Analisi pattern candlestick per {symbol}..."
             )
@@ -1155,29 +1085,47 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 _os.unlink(tmp_path)
             except Exception as e:
                 logger.error(f"Errore generazione chart pattern {symbol}: {e}")
+            return
 
-        else:
-            # ── Top-N scan multi-simbolo ──────────────────────────────────────
-            n_syms = len(_mls.discover_symbols())
-            await update.message.reply_text(
-                f"🔍 Analisi pattern candlestick su {n_syms} simboli...\n"
-                f"_(verranno mostrati solo i simboli con pattern attivi sull'ultima candela)_",
-                parse_mode='Markdown'
-            )
-            results = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: _mls.scan_patterns_top(top_n)
-            )
-            if not results:
-                await update.message.reply_text("📭 Nessun pattern candlestick trovato.")
-                return
+    # ── plugin generico dal registry (vsa / volume / pattern / ...) ──────────
+    if mode in _mls.SCANNER_PLUGINS:
+        plugin = _mls.SCANNER_PLUGINS[mode]
+        top_n = 10
+        if len(args) > 1 and args[1].isdigit():
+            top_n = max(1, int(args[1]))
 
-            for r in results:
-                msg = _mls.format_pattern_alert(r)
-                try:
-                    await update.message.reply_text(msg, parse_mode='HTML')
-                except Exception as e:
-                    logger.error(f"Errore invio pattern alert: {e}")
+        symbols = _mls.discover_symbols()
+        await update.message.reply_text(f"🔍 Calcolo {plugin.label} su {len(symbols)} simboli...")
 
+        live_prices, funding_map = await asyncio.gather(
+            _mls.fetch_live_prices(),
+            _mls._fetch_all_funding_rates(),
+        )
+
+        def _run_plugin_scan():
+            results = []
+            for sym in symbols:
+                data = _mls.load_last_candles(sym, _mls.LOOKBACK)
+                if data is None:
+                    continue
+                lp = live_prices.get(sym)
+                fr = funding_map.get(sym.upper())
+                r = plugin.compute(sym, data, live_price=lp, funding_rate=fr)
+                if r is not None:
+                    results.append(r)
+            results.sort(key=lambda r: r['score'], reverse=True)
+            return results[:top_n]
+
+        results = await asyncio.get_event_loop().run_in_executor(None, _run_plugin_scan)
+        if not results:
+            await update.message.reply_text("📭 Nessun segnale trovato.")
+            return
+
+        lines = [f"{plugin.label} — Top {top_n} — 15m\n"]
+        for r in results:
+            lines.append(plugin.format_compact(r))
+
+        await update.message.reply_text("\n".join(lines), parse_mode='Markdown')
         return
 
     # ── fvg ──────────────────────────────────────────────────────────────────
@@ -1320,33 +1268,67 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── daemon ───────────────────────────────────────────────────────────────
     if mode == 'daemon':
-        scan_mode = 'vsa'
-        min_score = monitor.scanner_min_score
-        for arg in args[1:]:
-            al = arg.lower()
-            if al in ('vsa', 'volume', 'pattern'):
-                scan_mode = al
-            elif arg.isdigit():
-                min_score = int(arg)
-        # registra SOLO questo utente nel daemon
-        monitor.scanner_subscribers[chat_id] = {'mode': scan_mode, 'min_score': min_score}
-        monitor.scanner_enabled = True
-        score_str = f" (soglia {min_score})" if min_score != 60 else ""
-        if scan_mode == 'volume':
-            mode_label = "📊 Volume spike"
-        elif scan_mode == 'pattern':
-            mode_label = "🕯 Pattern candlestick"
+        daemon_str = ''.join(args[1:]).strip()
+
+        if not daemon_str:
+            # Retrocompatibile: nessun argomento → solo VSA con soglia corrente
+            plugin_names = ['vsa']
+            thresholds   = {'vsa': monitor.scanner_min_score}
         else:
-            mode_label = "🧠 VSA score"
+            plugin_names = []
+            thresholds   = {}
+            invalid      = []
+            for token in daemon_str.split(','):
+                token = token.strip()
+                if not token:
+                    continue
+                pname, _, pscore = token.partition(':')
+                pname = pname.strip().lower()
+                pscore = pscore.strip()
+                if pname not in _mls.SCANNER_PLUGINS:
+                    invalid.append(pname)
+                    continue
+                plugin_names.append(pname)
+                try:
+                    thresholds[pname] = float(pscore) if pscore else _mls.SCANNER_PLUGINS[pname].default_min_score
+                except ValueError:
+                    thresholds[pname] = _mls.SCANNER_PLUGINS[pname].default_min_score
+
+            if invalid:
+                valid_list = ', '.join(sorted(_mls.SCANNER_PLUGINS.keys()))
+                await update.message.reply_text(
+                    f"❌ Plugin non validi: {', '.join(invalid)}\n"
+                    f"Plugin disponibili: {valid_list}"
+                )
+                return
+            if not plugin_names:
+                await update.message.reply_text(
+                    "❌ Nessun plugin valido specificato.\n"
+                    f"Es: `/scan daemon vsa:75,volume:60`", parse_mode='Markdown'
+                )
+                return
+
+        monitor.scanner_active_plugins = set(plugin_names)
+        for pname in plugin_names:
+            monitor.scanner_thresholds[pname] = thresholds[pname]
+        monitor.scanner_chat_ids.add(chat_id)
+        monitor.scanner_enabled = True
+
+        labels = [
+            f"• {_mls.SCANNER_PLUGINS[p].label} — soglia {monitor.scanner_thresholds[p]:g}"
+            for p in plugin_names
+        ]
         await update.message.reply_text(
-            f"🤖 *Scanner daemon attivato* — {mode_label}{score_str}\n"
-            f"Check automatico dopo ogni chiusura candela 15m.\n"
+            "🤖 *Scanner daemon attivato*\n" + "\n".join(labels) + "\n\n"
+            f"Check automatico ogni {SCANNER_DAEMON_INTERVAL_SECS // 60} minuti "
+            f"sulla candela live.\n"
             f"Usa /scanstop per disattivare.",
             parse_mode='Markdown'
         )
         return
 
-    # ── VSA scan manuale ─────────────────────────────────────────────────────
+    # ── VSA scan manuale (fallback di default) ────────────────────────────────
+    plugin    = _mls.SCANNER_PLUGINS['vsa']
     symbol    = None
     min_score = monitor.scanner_min_score
     for arg in args:
@@ -1376,11 +1358,11 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         lp     = live_prices.get(symbol)
         fr     = funding_map.get(symbol.upper())
-        result = _mls.compute_opportunity(data, live_price=lp, funding_rate=fr)
+        result = plugin.compute(symbol, data, live_price=lp, funding_rate=fr)
         if result and result['score'] >= min_score:
-            msg = _mls.format_alert(result)
+            msg = plugin.format_alert(result)
         else:
-            msg = _mls.format_mini_analysis(data, live_price=lp, funding_rate=fr)
+            msg = plugin.format_mini(data, live_price=lp, funding_rate=fr)
         try:
             await update.message.reply_text(msg, parse_mode='HTML')
         except Exception as e:
@@ -1395,7 +1377,7 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             continue
         lp     = live_prices.get(sym)
         fr     = funding_map.get(sym.upper())
-        result = _mls.compute_opportunity(data, live_price=lp, funding_rate=fr)
+        result = plugin.compute(sym, data, live_price=lp, funding_rate=fr)
         if result and result['score'] >= min_score:
             opportunities.append(result)
 
@@ -1408,7 +1390,7 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     for r in opportunities:
-        msg = _mls.format_alert(r)
+        msg = plugin.format_alert(r)
         try:
             await update.message.reply_text(msg, parse_mode='HTML')
         except Exception as e:
@@ -1421,10 +1403,11 @@ async def scanstop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Non autorizzato.")
         return
 
-    if chat_id in monitor.scanner_subscribers:
-        monitor.scanner_subscribers.pop(chat_id)
-        if not monitor.scanner_subscribers:
+    if chat_id in monitor.scanner_chat_ids:
+        monitor.scanner_chat_ids.discard(chat_id)
+        if not monitor.scanner_chat_ids:
             monitor.scanner_enabled = False
+            monitor.scanner_active_plugins = set()
         await update.message.reply_text("⏸ *Scanner daemon fermato.*", parse_mode='Markdown')
     else:
         await update.message.reply_text("ℹ️ Scanner daemon non era attivo per te.")
@@ -1436,35 +1419,37 @@ async def scanstatus_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("❌ Non autorizzato.")
         return
 
-    stato     = "✅ ATTIVO" if monitor.scanner_enabled else "⏸ NON ATTIVO"
-    scan_mode = getattr(monitor, 'scanner_mode', 'vsa')
-    if scan_mode == 'volume':
-        mode_label = "📊 Volume spike"
-    elif scan_mode == 'pattern':
-        mode_label = "🕯 Pattern candlestick"
+    stato   = "✅ ATTIVO" if monitor.scanner_enabled else "⏸ NON ATTIVO"
+    n_users = len(monitor.scanner_chat_ids)
+
+    lines = [
+        f"📡 *ML Scanner* — {stato}",
+        f"Utenti: {n_users}",
+        f"Simboli disponibili: {len(_mls.discover_symbols())}",
+        "",
+    ]
+
+    if monitor.scanner_active_plugins:
+        lines.append("*Plugin attivi:*")
+        for pname in sorted(monitor.scanner_active_plugins):
+            plugin = _mls.SCANNER_PLUGINS.get(pname)
+            if plugin is None:
+                continue
+            score = monitor.scanner_thresholds.get(pname, plugin.default_min_score)
+            line  = f"• {plugin.label} — soglia {score:g}"
+            if pname == 'vsa' and _mls._last_signals:
+                recenti = sorted(
+                    _mls._last_signals.items(), key=lambda x: x[1]['time'], reverse=True
+                )[:5]
+                line += "\n  Ultimi segnali:\n" + "\n".join(
+                    f"    {sym}: {v['direction']} score={v['score']} @ {v['time'].strftime('%H:%M')}"
+                    for sym, v in recenti
+                )
+            lines.append(line)
     else:
-        mode_label = "🧠 VSA score"
-    score      = monitor.scanner_min_score
-    n_users    = len(monitor.scanner_chat_ids)
-    last       = _mls._last_signals
+        lines.append("_Nessun plugin attivo._")
 
-    last_str = ""
-    if last and scan_mode == 'vsa':
-        recenti = sorted(last.items(), key=lambda x: x[1]['time'], reverse=True)[:5]
-        last_str = "\n\nUltimi segnali VSA:\n" + "\n".join(
-            f"  {sym}: {v['direction']} score={v['score']} @ {v['time'].strftime('%H:%M')}"
-            for sym, v in recenti
-        )
-
-    await update.message.reply_text(
-        f"📡 *ML Scanner* — {stato}\n"
-        f"Modalità: {mode_label}\n"
-        f"Soglia score: {score}/100\n"
-        f"Utenti: {n_users}\n"
-        f"Simboli disponibili: {len(_mls.discover_symbols())}"
-        f"{last_str}",
-        parse_mode='Markdown'
-    )
+    await update.message.reply_text("\n".join(lines), parse_mode='Markdown')
 
 
 # ---------------------------------------------------------------------------
@@ -3234,6 +3219,7 @@ async def post_init(application: Application):
             'PRICE_CHANGE_THRESHOLD':      PRICE_CHANGE_THRESHOLD,
             'POSITION_TRACK_INTERVAL':     POSITION_TRACK_INTERVAL,
             'CANDLES_INTERVAL_SECS':       CANDLES_INTERVAL_SECS,
+            'SCANNER_DAEMON_INTERVAL_SECS': SCANNER_DAEMON_INTERVAL_SECS,
             'PRICES_TIME':                 PRICES_TIME,
             'PRICES_DIR':                  PRICES_DIR,
             'CANDLES_DIR':                 CANDLES_DIR,
@@ -3252,6 +3238,8 @@ async def post_init(application: Application):
             'get_yesterday_price': get_yesterday_price,
             '_fmt':                _fmt,
             '_mls':                _mls,
+            'fetch_live_candle':   fetch_live_candle,
+            'append_live_candle':  cc.append_live_candle,
         }
     )
     init_tasks(ctx)
@@ -3259,6 +3247,7 @@ async def post_init(application: Application):
     asyncio.create_task(price_polling_task(application))
     asyncio.create_task(position_tracking_task(application))
     asyncio.create_task(candle_task(application))
+    asyncio.create_task(scanner_daemon_task(application))
 
 async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/analyze SIMBOLO [--dryrun] — Analisi tecnica AI con chart daily + 15m."""
