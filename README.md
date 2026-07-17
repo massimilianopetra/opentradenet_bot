@@ -318,6 +318,15 @@ Opzioni disponibili:
 /chartopt bb off         — nasconde le Bollinger Bands
 ```
 
+#### `/csv SYM [N]`
+
+Esporta in un file CSV le candele 15m salvate su disco per il simbolo, come documento Telegram. Prima dell'invio ri-fetcha dall'API le candele più recenti e corregge in memoria le ultime righe se erano state salvate mentre la candela era ancora in formazione (stessa logica di `save_candles()`, ma senza toccare il file su disco). Comando stateless, nessuna preferenza salvata.
+
+```
+/csv SOL       — ultime 241 candele 15m (default)
+/csv SOL 500   — ultime 500 candele 15m
+```
+
 ### Analisi AI — `/analyze`
 
 Genera il chart daily (ricampionato da 15m, ultimi 56 giorni) e il chart 15m, li invia alla Claude Vision API e riceve un'analisi tecnica strutturata.

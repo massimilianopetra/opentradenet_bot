@@ -239,7 +239,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/orders                    — ordini condizionali attivi (TP)\n"
         "/cancelcond ID|SYM|all     — cancella ordine condizionale\n"
         "/chart SYM [N] [TF]       — grafico candele (es: /chart GOLD 72 1H)\n"
-        "/chartopt [opz] [on|off]  — configura opzioni grafico (reg, macd, rsi, ichimoku)\n"
+        "/chartopt [opz] [on|off]  — configura opzioni grafico (reg, macd, rsi, ichimoku, bb)\n"
+        "/csv SYM [N]              — esporta CSV candele 15m (default 241)\n"
         "/analyze SYM              — analisi tecnica AI daily+15m con setup suggerito\n"
         "/scan                     — scanner (tutti i plugin: vsa/volume/pattern)\n"
         "/scan volume [N]          — top N spike di volume 15m\n"
@@ -821,6 +822,106 @@ async def chart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if tmp_path:
             try:
                 import os
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+
+
+async def csv_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/csv SIMBOLO [candele] — esporta in CSV le candele 15m salvate su disco."""
+    if not context.args:
+        await update.message.reply_text(
+            "Uso: `/csv SIMBOLO [candele]`\n"
+            "Es: `/csv SOL` — ultime 241 candele 15m\n"
+            "Es: `/csv SOL 500` — ultime 500 candele 15m",
+            parse_mode='Markdown'
+        )
+        return
+
+    symbol = context.args[0].upper()
+
+    bars = 241
+    if len(context.args) > 1:
+        try:
+            bars = int(context.args[1])
+        except ValueError:
+            await update.message.reply_text(
+                f"❌ Numero di candele non valido: `{context.args[1]}`",
+                parse_mode='Markdown'
+            )
+            return
+        if bars < 10 or bars > 5000:
+            await update.message.reply_text("❌ Numero di candele deve essere tra 10 e 5000.")
+            return
+
+    try:
+        csv_path = cc.find_csv(symbol, Path(CANDLES_DIR))
+    except FileNotFoundError:
+        await update.message.reply_text(
+            f"❌ Nessuna candela disponibile per *{symbol}*.\n"
+            f"Il simbolo deve essere monitorato dal bot (presente in `data/candles/`).",
+            parse_mode='Markdown'
+        )
+        return
+
+    try:
+        with open(csv_path, 'r', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            header = next(reader, None)
+            rows   = [row for row in reader if row]
+    except Exception as e:
+        logger.error(f"csv_command: errore lettura {csv_path}: {e}")
+        await update.message.reply_text(f"❌ Errore leggendo i dati di *{symbol}*.", parse_mode='Markdown')
+        return
+
+    if not rows:
+        await update.message.reply_text(f"❌ Nessun dato disponibile per *{symbol}*.", parse_mode='Markdown')
+        return
+
+    # Rifetch dall'API le candele più recenti e corregge le ultime righe se erano
+    # state salvate mentre la candela era ancora in formazione — stessa logica
+    # di sovrascrittura "ultime 2 candele" usata da save_candles(), qui applicata
+    # solo in memoria (il CSV su disco non viene toccato).
+    try:
+        _dex  = await _detect_dex(symbol)
+        fresh = await fetch_candles_15m(symbol, _dex)
+    except Exception as e:
+        logger.warning(f"csv_command: rifetch API fallito per {symbol}: {e}")
+        fresh = []
+
+    if fresh:
+        rows_by_ts = {r[0]: r for r in rows}
+        overwrite_ts = set(sorted(rows_by_ts.keys())[-2:])
+        for c in fresh:
+            ts = c['timestamp']
+            if ts not in rows_by_ts or ts in overwrite_ts:
+                rows_by_ts[ts] = [ts, c['open'], c['high'], c['low'], c['close'], c['volume']]
+        rows = sorted(rows_by_ts.values(), key=lambda r: r[0])
+
+    export_rows = rows[-bars:]
+
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False,
+                                         newline='', encoding='utf-8') as tmp:
+            tmp_path = tmp.name
+            writer = csv.writer(tmp)
+            writer.writerow(header or ['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            writer.writerows(export_rows)
+
+        filename = f"{symbol}_15m_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        caption = (
+            f"📄 {symbol} · 15m · {len(export_rows)} candele\n"
+            f"Ultima: {export_rows[-1][0]}"
+        )
+        with open(tmp_path, 'rb') as doc:
+            await update.message.reply_document(document=doc, filename=filename, caption=caption)
+    except Exception as e:
+        logger.error(f"csv_command: errore invio CSV {symbol}: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Errore generando/inviando il CSV per *{symbol}*.", parse_mode='Markdown')
+    finally:
+        if tmp_path:
+            try:
                 os.unlink(tmp_path)
             except Exception:
                 pass
@@ -3196,7 +3297,7 @@ def _save_chart_prefs() -> None:
 
 
 async def chartopt_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/chartopt [opzione] [on|off] — configura le opzioni del grafico (reg, macd, rsi, ichimoku)."""
+    """/chartopt [opzione] [on|off] — configura le opzioni del grafico (reg, macd, rsi, ichimoku, bb)."""
     chat_id  = update.effective_chat.id
     opt_list = ', '.join(CHART_OPTION_DEFAULTS)
 
@@ -3674,6 +3775,7 @@ def main():
     app.add_handler(CommandHandler("cancelcond",   cancelcond_command))
     app.add_handler(CommandHandler("chart",       chart_command))
     app.add_handler(CommandHandler("chartopt",    chartopt_command))
+    app.add_handler(CommandHandler("csv",         csv_command))
     app.add_handler(CommandHandler("scan",         scan_command))
     app.add_handler(CommandHandler("analyze",      analyze_command))
     app.add_handler(CommandHandler("scanstop",     scanstop_command))
