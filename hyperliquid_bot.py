@@ -143,11 +143,11 @@ else:
 DATA_DIR    = Path(os.getenv('DATA_DIR', 'data'))
 wallet_store = WalletStore(DATA_DIR, _enc_key)
 
-# Preferenze grafico per-utente: mostrare le trendline S/R?
-# Persistito in data/chart_prefs/trendlines.json — caricato in post_init.
-# Default False: le trendline sono nascoste finché l'utente non fa /chartlines on.
-_CHART_PREFS_FILE: Path = DATA_DIR / 'chart_prefs' / 'trendlines.json'
-_chart_trendlines: dict = {}   # chat_id (int) → bool
+# Preferenze grafico per-utente: mostrare il canale di regressione lineare?
+# Persistito in data/chart_prefs/regression.json — caricato in post_init.
+# Default False: il canale è nascosto finché l'utente non fa /chartreg on.
+_CHART_PREFS_FILE: Path = DATA_DIR / 'chart_prefs' / 'regression.json'
+_chart_regression: dict = {}   # chat_id (int) → bool
 
 # ---------------------------------------------------------------------------
 # Symbols info database
@@ -227,6 +227,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/orders                    — ordini condizionali attivi (TP)\n"
         "/cancelcond ID|SYM|all     — cancella ordine condizionale\n"
         "/chart SYM [N] [TF]       — grafico candele (es: /chart GOLD 72 1H)\n"
+        "/chartreg on|off          — attiva/disattiva canale di regressione lineare nel grafico\n"
         "/analyze SYM              — analisi tecnica AI daily+15m con setup suggerito\n"
         "/scan                     — scanner (tutti i plugin: vsa/volume/pattern)\n"
         "/scan volume [N]          — top N spike di volume 15m\n"
@@ -770,7 +771,7 @@ async def chart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 data = cc.append_live_candle(data, float(_fallback))
 
         fig = cc.plot_chart(data, symbol, timeframe,
-                            show_trendlines=_chart_trendlines.get(update.effective_chat.id, False))
+                            show_regression=_chart_regression.get(update.effective_chat.id, False))
 
         with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
             tmp_path = tmp.name
@@ -2264,7 +2265,7 @@ async def _prepare_order(update, chat_id, symbol, usd, is_buy):
                 _chart_data = cc.append_live_candle(_chart_data, float(price))
             _fig = await asyncio.get_event_loop().run_in_executor(
                 None, lambda: cc.plot_chart(_chart_data, symbol, '15m',
-                                            show_trendlines=_chart_trendlines.get(chat_id, False))
+                                            show_regression=_chart_regression.get(chat_id, False))
             )
             with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as _tmp:
                 _chart_tmp = _tmp.name
@@ -3138,56 +3139,56 @@ async def trade_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------------------------------------------------------------------
 
 def _load_chart_prefs() -> None:
-    """Carica le preferenze trendline da disco in _chart_trendlines."""
-    global _chart_trendlines
+    """Carica le preferenze canale di regressione da disco in _chart_regression."""
+    global _chart_regression
     try:
         if _CHART_PREFS_FILE.exists():
             raw = json.loads(_CHART_PREFS_FILE.read_text(encoding='utf-8'))
-            _chart_trendlines = {int(k): bool(v) for k, v in raw.items()}
-            logger.info(f"chart_prefs caricato: {len(_chart_trendlines)} utenti")
+            _chart_regression = {int(k): bool(v) for k, v in raw.items()}
+            logger.info(f"chart_prefs caricato: {len(_chart_regression)} utenti")
     except Exception as e:
         logger.warning(f"chart_prefs load failed: {e}")
-        _chart_trendlines = {}
+        _chart_regression = {}
 
 
 def _save_chart_prefs() -> None:
-    """Salva _chart_trendlines su disco."""
+    """Salva _chart_regression su disco."""
     try:
         _CHART_PREFS_FILE.parent.mkdir(parents=True, exist_ok=True)
         _CHART_PREFS_FILE.write_text(
-            json.dumps({str(k): v for k, v in _chart_trendlines.items()}, indent=2),
+            json.dumps({str(k): v for k, v in _chart_regression.items()}, indent=2),
             encoding='utf-8'
         )
     except Exception as e:
         logger.warning(f"chart_prefs save failed: {e}")
 
 
-async def chartlines_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/chartlines [on|off] — attiva/disattiva le trendline S/R nel grafico."""
+async def chartreg_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/chartreg [on|off] — attiva/disattiva il canale di regressione lineare nel grafico."""
     chat_id = update.effective_chat.id
 
     if not context.args:
-        state = _chart_trendlines.get(chat_id, False)
-        label  = "attive"   if state else "nascoste"
+        state = _chart_regression.get(chat_id, False)
+        label  = "attivo"   if state else "nascosto"
         toggle = "off"      if state else "on"
-        hint   = "nasconderle" if state else "attivarle"
+        hint   = "nasconderlo" if state else "attivarlo"
         await update.message.reply_text(
-            f"📊 Linee di supporto/resistenza: {label}\n"
-            f"Usa /chartlines {toggle} per {hint}"
+            f"📊 Canale di regressione lineare: {label}\n"
+            f"Usa /chartreg {toggle} per {hint}"
         )
         return
 
     arg = context.args[0].lower()
     if arg == 'on':
-        _chart_trendlines[chat_id] = True
+        _chart_regression[chat_id] = True
         _save_chart_prefs()
-        await update.message.reply_text("📊 Linee di supporto/resistenza: attivate ✅")
+        await update.message.reply_text("📊 Canale di regressione lineare: attivato ✅")
     elif arg == 'off':
-        _chart_trendlines[chat_id] = False
+        _chart_regression[chat_id] = False
         _save_chart_prefs()
-        await update.message.reply_text("📊 Linee di supporto/resistenza: nascoste 🔕")
+        await update.message.reply_text("📊 Canale di regressione lineare: nascosto 🔕")
     else:
-        await update.message.reply_text("Uso: /chartlines on|off")
+        await update.message.reply_text("Uso: /chartreg on|off")
 
 
 async def post_init(application: Application):
@@ -3631,7 +3632,7 @@ def main():
     app.add_handler(CommandHandler("orders",       orders_command))
     app.add_handler(CommandHandler("cancelcond",   cancelcond_command))
     app.add_handler(CommandHandler("chart",       chart_command))
-    app.add_handler(CommandHandler("chartlines",  chartlines_command))
+    app.add_handler(CommandHandler("chartreg",    chartreg_command))
     app.add_handler(CommandHandler("scan",         scan_command))
     app.add_handler(CommandHandler("analyze",      analyze_command))
     app.add_handler(CommandHandler("scanstop",     scanstop_command))

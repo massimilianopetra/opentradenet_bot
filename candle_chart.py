@@ -258,192 +258,33 @@ def _bollinger(closes: np.ndarray, period: int = 20, std_dev: float = 2.0):
     return upper, mid, lower
 
 
-def _pivot_levels(highs: np.ndarray, lows: np.ndarray, window: int = 5, max_levels: int = 4):
-    """Trova supporti e resistenze da pivot locali."""
-    resistances, supports = [], []
-    n = len(highs)
-    for i in range(window, n - window):
-        if highs[i] == max(highs[i - window : i + window + 1]):
-            resistances.append(highs[i])
-        if lows[i]  == min(lows[i  - window : i + window + 1]):
-            supports.append(lows[i])
-    # Rimuove duplicati e prende gli ultimi max_levels
-    resistances = sorted(set(round(r, 6) for r in resistances))[-max_levels:]
-    supports    = sorted(set(round(s, 6) for s in supports))[:max_levels]
-    return resistances, supports
-
-
-def _find_pivots(arr: np.ndarray, window: int = 5) -> list:
+def _linear_regression_channel(closes: np.ndarray, n: int, bars: int = 120,
+                               k: float = 2.0) -> dict:
     """
-    Ritorna lista di (indice, valore) dei pivot locali nell'array.
+    Canale di regressione lineare (least-squares) sulle ultime `bars` candele.
+
+    Ritorna dict con array (lunghezza n, NaN fuori dalla finestra) per
+    mid/upper/lower e l'indice di inizio finestra, così plot_chart può
+    disegnare il canale solo sul segmento coperto dal fit, come in TradingView.
     """
-    pivots = []
-    n = len(arr)
-    for i in range(window, n - window):
-        segment = arr[i - window : i + window + 1]
-        if arr[i] == segment.max() or arr[i] == segment.min():
-            pivots.append((i, arr[i]))
-    return pivots
+    mid   = np.full(n, np.nan)
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
 
+    start = max(0, n - bars)
+    xs      = np.arange(start, n)
+    ys      = closes[start:n]
+    if len(xs) < 2:
+        return {'mid': mid, 'upper': upper, 'lower': lower, 'start': start}
 
-def _trendlines(highs: np.ndarray, lows: np.ndarray,
-                n: int,
-                pivot_window: int = 5,
-                tolerance_pct: float = 0.6,
-                max_violation_pct: float = 1.2,
-                max_violations: int = 1,
-                min_touches: int = 2,
-                max_lines: int = 3,
-                extend_bars: int = 10) -> dict:
-    """
-    Calcola trendline di resistenza (su massimi) e supporto (su minimi).
+    slope, intercept = np.polyfit(xs, ys, 1)
+    fit  = slope * xs + intercept
+    std  = float(np.std(ys - fit))
 
-    Differenza chiave resistenza vs supporto:
-    - Resistenza: nessun HIGH deve superare la retta di più di max_violation_pct%
-    - Supporto:   nessun LOW deve scendere sotto la retta di più di max_violation_pct%
-      (permettiamo max_violations brevi sfondamenti per wick anomale)
-
-    La tolerance per i tocchi è calcolata sul prezzo medio (non sul range totale),
-    così funziona correttamente sia per BTC (~80k) sia per simboli < 1.
-
-    Args:
-        tolerance_pct:     % del prezzo medio per considerare un "tocco" alla retta
-        max_violation_pct: % del prezzo medio di violazione massima tollerata
-        max_violations:    numero massimo di candele che possono violare (wick anomale)
-    """
-    result = {'resistance': [], 'support': []}
-
-    mid_price = float(np.nanmedian((highs + lows) / 2))
-    if mid_price == 0:
-        return result
-
-    # Tolleranza assoluta proporzionale al prezzo corrente (non al range)
-    tol      = mid_price * tolerance_pct    / 100.0
-    viol_tol = mid_price * max_violation_pct / 100.0
-
-    # ── Helper: valuta una retta su un array di prezzi ───────────────────
-    def _evaluate_line(price_arr, i1, slope, intercept, above_is_bad: bool):
-        """
-        price_arr:     array dei prezzi da confrontare con la retta (highs o lows)
-        above_is_bad:  True per resistenza (sopra = violazione),
-                       False per supporto   (sotto = violazione)
-        Ritorna (valid, touches, n_violations)
-        """
-        xs   = np.arange(i1, n)
-        line = slope * xs + intercept
-
-        segment_prices = price_arr[i1:]
-        diff = segment_prices - line          # positivo = sopra la retta
-
-        if above_is_bad:
-            violations = np.sum(diff > viol_tol)
-        else:
-            violations = np.sum(diff < -viol_tol)
-
-        if violations > max_violations:
-            return False, 0, violations
-
-        touches = int(np.sum(np.abs(diff) <= tol))
-        return True, touches, violations
-
-    # ── Resistenze: pivot sui massimi ────────────────────────────────────
-    res_pivots = []
-    for i in range(pivot_window, n - pivot_window):
-        if highs[i] == np.max(highs[max(0, i - pivot_window) : i + pivot_window + 1]):
-            res_pivots.append((i, highs[i]))
-
-    res_lines = []
-    for a in range(len(res_pivots)):
-        for b in range(a + 1, len(res_pivots)):
-            i1, v1 = res_pivots[a]
-            i2, v2 = res_pivots[b]
-            if i2 <= i1:
-                continue
-            slope     = (v2 - v1) / (i2 - i1)
-            intercept = v1 - slope * i1
-
-            valid, touches, n_viol = _evaluate_line(highs, i1, slope, intercept,
-                                                    above_is_bad=True)
-            if not valid or touches < min_touches:
-                continue
-
-            recency = i2 / n
-            x_end   = n - 1 + extend_bars
-            res_lines.append({
-                'x_start':  i1,
-                'y_start':  v1,
-                'x_end':    x_end,
-                'y_end':    slope * x_end + intercept,
-                'touches':  touches,
-                'slope':    slope,
-                'score':    touches + recency * 2 - n_viol * 0.5,
-            })
-
-    res_lines.sort(key=lambda l: -l['score'])
-    result['resistance'] = _deduplicate_lines(res_lines, tol, max_lines)
-
-    # ── Supporti: pivot sui minimi ────────────────────────────────────────
-    sup_pivots = []
-    for i in range(pivot_window, n - pivot_window):
-        if lows[i] == np.min(lows[max(0, i - pivot_window) : i + pivot_window + 1]):
-            sup_pivots.append((i, lows[i]))
-
-    sup_lines = []
-    for a in range(len(sup_pivots)):
-        for b in range(a + 1, len(sup_pivots)):
-            i1, v1 = sup_pivots[a]
-            i2, v2 = sup_pivots[b]
-            if i2 <= i1:
-                continue
-            slope     = (v2 - v1) / (i2 - i1)
-            intercept = v1 - slope * i1
-
-            valid, touches, n_viol = _evaluate_line(lows, i1, slope, intercept,
-                                                    above_is_bad=False)
-            if not valid or touches < min_touches:
-                continue
-
-            recency = i2 / n
-            x_end   = n - 1 + extend_bars
-            sup_lines.append({
-                'x_start':  i1,
-                'y_start':  v1,
-                'x_end':    x_end,
-                'y_end':    slope * x_end + intercept,
-                'touches':  touches,
-                'slope':    slope,
-                'score':    touches + recency * 2 - n_viol * 0.5,
-            })
-
-    sup_lines.sort(key=lambda l: -l['score'])
-    result['support'] = _deduplicate_lines(sup_lines, tol, max_lines)
-
-    return result
-
-
-def _deduplicate_lines(lines: list, tol: float, max_n: int) -> list:
-    """
-    Rimuove trendline troppo simili.
-    Due rette sono "uguali" solo se hanno CONTEMPORANEAMENTE:
-    - pendenza molto simile (entro 20% relativo)
-    - valore finale molto vicino (entro 8×tol)
-    Così rette con pendenze diverse ma stesso punto di arrivo vengono entrambe tenute.
-    """
-    kept = []
-    for line in lines:
-        too_close = False
-        for k in kept:
-            slope_ref   = abs(k['slope']) if abs(k['slope']) > 1e-9 else 1e-9
-            same_slope  = abs(line['slope'] - k['slope']) / slope_ref < 0.20
-            same_end    = abs(line['y_end'] - k['y_end']) < tol * 8
-            if same_slope and same_end:
-                too_close = True
-                break
-        if not too_close:
-            kept.append(line)
-        if len(kept) >= max_n:
-            break
-    return kept
+    mid[start:n]   = fit
+    upper[start:n] = fit + k * std
+    lower[start:n] = fit - k * std
+    return {'mid': mid, 'upper': upper, 'lower': lower, 'start': start}
 
 # ---------------------------------------------------------------------------
 # Formattazione etichette asse X per ogni timeframe
@@ -628,9 +469,10 @@ def _draw_pattern_panel(ax, opens, highs, lows, closes, n, pattern_info):
 
 def plot_chart(data: dict, symbol: str, timeframe: str = '15m',
                pattern_info: list | None = None,
-               show_trendlines: bool = True) -> plt.Figure:
+               show_regression: bool = False,
+               regression_bars: int = 120) -> plt.Figure:
     """
-    Genera il grafico a 4 pannelli: candele+BB+EMA+S&R, volume, RSI, MACD.
+    Genera il grafico a 4 pannelli: candele+BB+EMA, volume, RSI, MACD.
     Se pattern_info non è None aggiunge un 5° pannello con le ultime 5 candele
     e le etichette dei pattern rilevati.
 
@@ -641,8 +483,11 @@ def plot_chart(data: dict, symbol: str, timeframe: str = '15m',
         pattern_info:    lista di dict con campi name, direction, candle_indices.
                          Se None il pannello pattern non viene aggiunto e il
                          grafico è identico alla versione precedente.
-        show_trendlines: se False salta calcolo e disegno di supporti/resistenze
-                         orizzontali e trendline inclinate (default True).
+        show_regression: se True disegna il canale di regressione lineare
+                         (mediana + bande a ±2 deviazioni standard) sulle
+                         ultime `regression_bars` candele (default False).
+        regression_bars: numero di candele su cui calcolare il fit lineare
+                         (default 120).
 
     Returns:
         matplotlib Figure
@@ -666,21 +511,10 @@ def plot_chart(data: dict, symbol: str, timeframe: str = '15m',
     vol_ma = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma[i] = np.mean(volumes[i - 19 : i + 1])
-    if show_trendlines:
-        resistances, supports = _pivot_levels(highs, lows)
-        pwin       = max(3, min(7, n // 20))
-        trendlines = _trendlines(highs, lows, n,
-                                 pivot_window=pwin,
-                                 tolerance_pct=0.5,
-                                 max_violation_pct=1.0,
-                                 max_violations=1,
-                                 min_touches=2,
-                                 max_lines=3,
-                                 extend_bars=max(5, n // 10))
+    if show_regression:
+        regression = _linear_regression_channel(closes, n, bars=regression_bars)
     else:
-        resistances = []
-        supports    = []
-        trendlines  = {'resistance': [], 'support': []}
+        regression = None
 
     # ── Layout ──────────────────────────────────────────────────────────
     if pattern_info is not None:
@@ -742,37 +576,20 @@ def plot_chart(data: dict, symbol: str, timeframe: str = '15m',
         if v.any():
             ax1.plot(x[v], ema_arr[v], color=col, lw=1.0, alpha=0.85, label=lbl)
 
-    # Supporti e resistenze orizzontali (livelli)
-    for r in resistances:
-        ax1.axhline(r, color='#ff6b6b', lw=0.7, ls=':', alpha=0.7)
-    for s in supports:
-        ax1.axhline(s, color='#26a641', lw=0.7, ls=':', alpha=0.7)
-
-    # Trendline dinamiche (rette inclinate su pivot)
-    # Resistenza: arancio tratteggiato — più spessa se più tocchi
-    for i, tl in enumerate(trendlines['resistance']):
-        lw    = 1.0 + min(tl['touches'] - 2, 3) * 0.3   # spessore cresce con i tocchi
-        alpha = 0.55 + min(tl['touches'] - 2, 4) * 0.08
-        ax1.plot([tl['x_start'], tl['x_end']],
-                 [tl['y_start'], tl['y_end']],
-                 color='#ff9500', lw=lw, ls='--', alpha=alpha,
-                 label=f"TL-R ({tl['touches']})" if i == 0 else None,
-                 zorder=4)
-        # Pallino sul pivot di ancoraggio
-        ax1.scatter(tl['x_start'], tl['y_start'],
-                    color='#ff9500', s=18, zorder=5, alpha=0.8)
-
-    # Supporto: viola tratteggiato
-    for i, tl in enumerate(trendlines['support']):
-        lw    = 1.0 + min(tl['touches'] - 2, 3) * 0.3
-        alpha = 0.55 + min(tl['touches'] - 2, 4) * 0.08
-        ax1.plot([tl['x_start'], tl['x_end']],
-                 [tl['y_start'], tl['y_end']],
-                 color='#b09fd8', lw=lw, ls='--', alpha=alpha,
-                 label=f"TL-S ({tl['touches']})" if i == 0 else None,
-                 zorder=4)
-        ax1.scatter(tl['x_start'], tl['y_start'],
-                    color='#b09fd8', s=18, zorder=5, alpha=0.8)
+    # Canale di regressione lineare (mediana + bande ±2 dev.std)
+    if regression is not None:
+        r_valid = ~np.isnan(regression['mid'])
+        if r_valid.any():
+            rx  = x[r_valid]
+            mid = regression['mid'][r_valid]
+            up  = regression['upper'][r_valid]
+            lo  = regression['lower'][r_valid]
+            ax1.plot(rx, mid, color='#58a6ff', lw=1.0, ls='--', alpha=0.8,
+                     label=f"LR ({regression_bars})", zorder=4)
+            ax1.plot(rx, up, color='#58a6ff', lw=0.9, alpha=0.7, zorder=4)
+            ax1.plot(rx, lo, color='#58a6ff', lw=0.9, alpha=0.7, zorder=4)
+            ax1.fill_between(rx, up, mid, color='#58a6ff', alpha=0.12, zorder=1)
+            ax1.fill_between(rx, mid, lo, color='#f85149', alpha=0.12, zorder=1)
 
     ax1.set_xlim(-1, n)
     ax1.legend(loc='upper left', fontsize=7, facecolor='#161b22',
@@ -878,6 +695,10 @@ def main():
                         help='Salva il grafico in questo file PNG invece di aprirlo')
     parser.add_argument('--data-dir', default=default_dir,
                         help=f'Directory base dei CSV (default: {default_dir})')
+    parser.add_argument('--regression', action='store_true',
+                        help='Disegna il canale di regressione lineare')
+    parser.add_argument('--regression-bars', type=int, default=120,
+                        help='Numero di candele su cui calcolare la regressione (default: 120)')
     args = parser.parse_args()
 
     symbol    = args.symbol.upper()
@@ -904,7 +725,9 @@ def main():
     n = len(data['closes'])
     print(f"✅ Caricate {n} candele {timeframe}")
 
-    fig = plot_chart(data, symbol, timeframe)
+    fig = plot_chart(data, symbol, timeframe,
+                     show_regression=args.regression,
+                     regression_bars=args.regression_bars)
 
     if args.save:
         fig.savefig(args.save, dpi=110, bbox_inches='tight', facecolor='#0d1117')

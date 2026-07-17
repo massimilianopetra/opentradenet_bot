@@ -287,7 +287,7 @@ Cancella un ordine condizionale tramite il suo ID (visibile in `/orders`).
 
 #### `/chart SYM [N] [TF]`
 
-Grafico candlestick con Bollinger Bands, EMA 9/21/50, RSI, MACD, volume, supporti/resistenze e trendline dinamiche.
+Grafico candlestick con Bollinger Bands, EMA 9/21/50, RSI, MACD, volume.
 
 ```
 /chart GOLD           — ultime ~120 candele 15m
@@ -296,13 +296,13 @@ Grafico candlestick con Bollinger Bands, EMA 9/21/50, RSI, MACD, volume, support
 /chart GOLD 56 1D     — 56 candele daily
 ```
 
-#### `/chartlines on|off`
+#### `/chartreg on|off`
 
-Attiva o disattiva le trendline di supporto/resistenza dinamiche nel grafico. Preferenza salvata per-utente. Default: off.
+Attiva o disattiva il canale di regressione lineare (mediana + bande ±2 deviazioni standard, calcolate sulle ultime 120 candele) nel grafico. Preferenza salvata per-utente. Default: off.
 
 ```
-/chartlines on    — mostra trendline
-/chartlines off   — nasconde trendline
+/chartreg on    — mostra il canale di regressione
+/chartreg off   — nasconde il canale di regressione
 ```
 
 ### Analisi AI — `/analyze`
@@ -517,6 +517,8 @@ python3 candle_chart.py GOLD                        # ultime ~120 candele 15m
 python3 candle_chart.py GOLD --bars 200             # N candele personalizzate
 python3 candle_chart.py GOLD --save gold_chart.png  # salva PNG
 python3 candle_chart.py GOLD --data-dir /altro/path # directory custom
+python3 candle_chart.py GOLD --regression                        # canale di regressione lineare (120 candele)
+python3 candle_chart.py GOLD --timeframe 1D --regression --regression-bars 60  # su 60 candele daily
 ```
 
 ---
