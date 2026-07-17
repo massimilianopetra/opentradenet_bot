@@ -503,7 +503,7 @@ def _draw_pattern_panel(ax, opens, highs, lows, closes, n, pattern_info):
 def plot_chart(data: dict, symbol: str, timeframe: str = '15m',
                pattern_info: list | None = None,
                show_regression: bool = False,
-               regression_bars: int = 120,
+               regression_bars: int | None = None,
                show_macd: bool = True,
                show_rsi: bool = True,
                show_ichimoku: bool = True,
@@ -523,8 +523,9 @@ def plot_chart(data: dict, symbol: str, timeframe: str = '15m',
         show_regression: se True disegna il canale di regressione lineare
                          (mediana + bande a ±2 deviazioni standard) sulle
                          ultime `regression_bars` candele (default False).
-        regression_bars: numero di candele su cui calcolare il fit lineare
-                         (default 120).
+        regression_bars: numero di candele su cui calcolare il fit lineare.
+                         Se None (default) usa tutte le candele presenti nel
+                         grafico, qualunque sia il numero caricato (--bars).
         show_macd:       se False non disegna il pannello MACD (default True).
         show_rsi:        se False non disegna il pannello RSI (default True).
         show_ichimoku:   se True disegna la nuvola Ichimoku (Senkou Span A/B,
@@ -552,7 +553,8 @@ def plot_chart(data: dict, symbol: str, timeframe: str = '15m',
     vol_ma = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma[i] = np.mean(volumes[i - 19 : i + 1])
-    regression = _linear_regression_channel(closes, n, bars=regression_bars) if show_regression else None
+    _reg_bars  = regression_bars if regression_bars is not None else n
+    regression = _linear_regression_channel(closes, n, bars=_reg_bars) if show_regression else None
     ichimoku   = _ichimoku_cloud(highs, lows, n) if show_ichimoku else None
     rsi                    = _rsi(closes, 14)          if show_rsi  else None
     macd_l, macd_s, macd_h = _macd(closes, 12, 26, 9)  if show_macd else (None, None, None)
@@ -638,7 +640,7 @@ def plot_chart(data: dict, symbol: str, timeframe: str = '15m',
             up  = regression['upper'][r_valid]
             lo  = regression['lower'][r_valid]
             ax1.plot(rx, mid, color='#58a6ff', lw=1.0, ls='--', alpha=0.8,
-                     label=f"LR ({regression_bars})", zorder=4)
+                     label=f"LR ({_reg_bars})", zorder=4)
             ax1.plot(rx, up, color='#58a6ff', lw=0.9, alpha=0.7, zorder=4)
             ax1.plot(rx, lo, color='#58a6ff', lw=0.9, alpha=0.7, zorder=4)
             ax1.fill_between(rx, up, mid, color='#58a6ff', alpha=0.12, zorder=1)
@@ -768,8 +770,9 @@ def main():
                         help=f'Directory base dei CSV (default: {default_dir})')
     parser.add_argument('--regression', action='store_true',
                         help='Disegna il canale di regressione lineare (default: off)')
-    parser.add_argument('--regression-bars', type=int, default=120,
-                        help='Numero di candele su cui calcolare la regressione (default: 120)')
+    parser.add_argument('--regression-bars', type=int, default=None,
+                        help='Numero di candele su cui calcolare la regressione '
+                             '(default: tutte le candele del grafico, vedi --bars)')
     parser.add_argument('--no-macd', dest='macd', action='store_false',
                         help='Nasconde il pannello MACD (default: mostrato)')
     parser.add_argument('--no-rsi', dest='rsi', action='store_false',

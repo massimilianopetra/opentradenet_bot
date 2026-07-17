@@ -304,7 +304,7 @@ Opzioni disponibili:
 
 | Opzione    | Indicatore                              | Default |
 |------------|------------------------------------------|---------|
-| `reg`      | Canale di regressione lineare (120 candele) | off  |
+| `reg`      | Canale di regressione lineare (su tutte le candele del grafico) | off  |
 | `macd`     | Pannello MACD                            | on      |
 | `rsi`      | Pannello RSI                             | on      |
 | `ichimoku` | Nuvola Ichimoku (Senkou Span A/B, proiettata 26 candele avanti) | on |
@@ -530,8 +530,8 @@ python3 candle_chart.py GOLD                        # ultime ~240 candele 15m
 python3 candle_chart.py GOLD --bars 200             # N candele personalizzate
 python3 candle_chart.py GOLD --save gold_chart.png  # salva PNG
 python3 candle_chart.py GOLD --data-dir /altro/path # directory custom
-python3 candle_chart.py GOLD --regression                        # canale di regressione lineare (120 candele)
-python3 candle_chart.py GOLD --timeframe 1D --regression --regression-bars 60  # su 60 candele daily
+python3 candle_chart.py GOLD --regression                        # canale di regressione su tutte le candele caricate
+python3 candle_chart.py GOLD --timeframe 1D --regression --regression-bars 60  # forza il fit sulle ultime 60 candele daily
 python3 candle_chart.py GOLD --no-rsi --no-macd     # nasconde i pannelli RSI e MACD
 python3 candle_chart.py GOLD --no-ichimoku          # nasconde la nuvola Ichimoku (mostrata di default)
 python3 candle_chart.py GOLD --no-bb                # nasconde le Bollinger Bands (mostrate di default)
