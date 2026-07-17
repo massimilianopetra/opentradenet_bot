@@ -286,6 +286,39 @@ def _linear_regression_channel(closes: np.ndarray, n: int, bars: int = 120,
     lower[start:n] = fit - k * std
     return {'mid': mid, 'upper': upper, 'lower': lower, 'start': start}
 
+
+def _ichimoku_cloud(highs: np.ndarray, lows: np.ndarray, n: int,
+                    tenkan_period: int = 9, kijun_period: int = 26,
+                    senkou_b_period: int = 52, displacement: int = 26) -> dict:
+    """
+    Nuvola Ichimoku (kumo): solo Senkou Span A/B, proiettate `displacement`
+    candele in avanti rispetto all'ultima candela (come da convenzione
+    Ichimoku standard). Non calcola Tenkan-sen/Kijun-sen/Chikou Span come
+    linee a sé: Tenkan e Kijun servono solo internamente per Span A.
+
+    Ritorna array di lunghezza n + displacement (NaN dove non definiti),
+    così plot_chart può estendere l'asse X del pannello prezzo e mostrare
+    la proiezione futura della nuvola.
+    """
+    def _donchian_mid(period: int) -> np.ndarray:
+        mid = np.full(n, np.nan)
+        for i in range(period - 1, n):
+            mid[i] = (np.max(highs[i - period + 1 : i + 1]) +
+                      np.min(lows[i - period + 1 : i + 1])) / 2.0
+        return mid
+
+    tenkan     = _donchian_mid(tenkan_period)
+    kijun      = _donchian_mid(kijun_period)
+    span_a_raw = (tenkan + kijun) / 2.0
+    span_b_raw = _donchian_mid(senkou_b_period)
+
+    total  = n + displacement
+    span_a = np.full(total, np.nan)
+    span_b = np.full(total, np.nan)
+    span_a[displacement : displacement + n] = span_a_raw
+    span_b[displacement : displacement + n] = span_b_raw
+    return {'span_a': span_a, 'span_b': span_b, 'total': total, 'displacement': displacement}
+
 # ---------------------------------------------------------------------------
 # Formattazione etichette asse X per ogni timeframe
 # ---------------------------------------------------------------------------
@@ -470,10 +503,14 @@ def _draw_pattern_panel(ax, opens, highs, lows, closes, n, pattern_info):
 def plot_chart(data: dict, symbol: str, timeframe: str = '15m',
                pattern_info: list | None = None,
                show_regression: bool = False,
-               regression_bars: int = 120) -> plt.Figure:
+               regression_bars: int = 120,
+               show_macd: bool = True,
+               show_rsi: bool = True,
+               show_ichimoku: bool = True) -> plt.Figure:
     """
-    Genera il grafico a 4 pannelli: candele+BB+EMA, volume, RSI, MACD.
-    Se pattern_info non è None aggiunge un 5° pannello con le ultime 5 candele
+    Genera il grafico candlestick: candele+BB+EMA (+ canale di regressione
+    e/o nuvola Ichimoku, opzionali), volume, e pannelli opzionali RSI/MACD.
+    Se pattern_info non è None aggiunge un pannello con le ultime 5 candele
     e le etichette dei pattern rilevati.
 
     Args:
@@ -481,13 +518,17 @@ def plot_chart(data: dict, symbol: str, timeframe: str = '15m',
         symbol:          nome simbolo (per il titolo)
         timeframe:       '15m' | '1H' | '1D'
         pattern_info:    lista di dict con campi name, direction, candle_indices.
-                         Se None il pannello pattern non viene aggiunto e il
-                         grafico è identico alla versione precedente.
+                         Se None il pannello pattern non viene aggiunto.
         show_regression: se True disegna il canale di regressione lineare
                          (mediana + bande a ±2 deviazioni standard) sulle
                          ultime `regression_bars` candele (default False).
         regression_bars: numero di candele su cui calcolare il fit lineare
                          (default 120).
+        show_macd:       se False non disegna il pannello MACD (default True).
+        show_rsi:        se False non disegna il pannello RSI (default True).
+        show_ichimoku:   se True disegna la nuvola Ichimoku (Senkou Span A/B,
+                         proiettata 26 candele avanti) sul pannello prezzo
+                         (default True).
 
     Returns:
         matplotlib Figure
@@ -506,34 +547,43 @@ def plot_chart(data: dict, symbol: str, timeframe: str = '15m',
     ema21  = _ema(closes, 21)
     ema50  = _ema(closes, 50)
     bb_up, bb_mid, bb_lo = _bollinger(closes, 20, 2.0)
-    rsi    = _rsi(closes, 14)
-    macd_l, macd_s, macd_h = _macd(closes, 12, 26, 9)
     vol_ma = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma[i] = np.mean(volumes[i - 19 : i + 1])
-    if show_regression:
-        regression = _linear_regression_channel(closes, n, bars=regression_bars)
-    else:
-        regression = None
+    regression = _linear_regression_channel(closes, n, bars=regression_bars) if show_regression else None
+    ichimoku   = _ichimoku_cloud(highs, lows, n) if show_ichimoku else None
+    rsi                    = _rsi(closes, 14)          if show_rsi  else None
+    macd_l, macd_s, macd_h = _macd(closes, 12, 26, 9)  if show_macd else (None, None, None)
 
-    # ── Layout ──────────────────────────────────────────────────────────
+    # ── Layout dinamico: prezzo e volume sempre presenti, RSI/MACD/pattern opzionali ──
+    panels = ['price', 'volume']
+    if show_rsi:
+        panels.append('rsi')
+    if show_macd:
+        panels.append('macd')
     if pattern_info is not None:
-        fig = plt.figure(figsize=(16, 16), facecolor='#0d1117')
-        gs  = fig.add_gridspec(5, 1, height_ratios=[5, 1.5, 1.5, 1.5, 2.5],
-                               hspace=0.08, left=0.07, right=0.97,
-                               top=0.94, bottom=0.06)
-    else:
-        fig = plt.figure(figsize=(16, 12), facecolor='#0d1117')
-        gs  = fig.add_gridspec(4, 1, height_ratios=[5, 1.5, 1.5, 1.5],
-                               hspace=0.05, left=0.07, right=0.97,
-                               top=0.94, bottom=0.06)
+        panels.append('pattern')
 
-    ax1 = fig.add_subplot(gs[0])
-    ax2 = fig.add_subplot(gs[1], sharex=ax1)
-    ax3 = fig.add_subplot(gs[2], sharex=ax1)
-    ax4 = fig.add_subplot(gs[3], sharex=ax1)
+    height_map    = {'price': 5, 'volume': 1.5, 'rsi': 1.5, 'macd': 1.5, 'pattern': 2.5}
+    height_ratios = [height_map[p] for p in panels]
+    fig = plt.figure(figsize=(16, sum(height_ratios) * 1.3), facecolor='#0d1117')
+    gs  = fig.add_gridspec(len(panels), 1, height_ratios=height_ratios,
+                           hspace=0.08 if pattern_info is not None else 0.05,
+                           left=0.07, right=0.97, top=0.94, bottom=0.06)
 
-    for ax in (ax1, ax2, ax3, ax4):
+    ax1  = fig.add_subplot(gs[0])
+    axes = {'price': ax1}
+    for idx, p in enumerate(panels[1:], start=1):
+        # Il pannello pattern usa un proprio asse X (ultime 5 candele, indici 0..4)
+        # indipendente da quello del prezzo: niente sharex per non alterare l'xlim di ax1.
+        axes[p] = fig.add_subplot(gs[idx], sharex=(ax1 if p != 'pattern' else None))
+
+    ax2 = axes['volume']
+    ax3 = axes.get('rsi')
+    ax4 = axes.get('macd')
+    ax5 = axes.get('pattern')
+
+    for ax in axes.values():
         ax.set_facecolor('#0d1117')
         ax.tick_params(colors='#8b949e', labelsize=8)
         ax.spines['bottom'].set_color('#30363d')
@@ -591,7 +641,23 @@ def plot_chart(data: dict, symbol: str, timeframe: str = '15m',
             ax1.fill_between(rx, up, mid, color='#58a6ff', alpha=0.12, zorder=1)
             ax1.fill_between(rx, mid, lo, color='#f85149', alpha=0.12, zorder=1)
 
-    ax1.set_xlim(-1, n)
+    # Nuvola Ichimoku (Senkou Span A/B, proiettata avanti)
+    ichimoku_extra = 0
+    if ichimoku is not None:
+        ichimoku_extra = ichimoku['displacement']
+        cx    = np.arange(ichimoku['total'])
+        sa    = ichimoku['span_a']
+        sb    = ichimoku['span_b']
+        i_valid = ~np.isnan(sa) & ~np.isnan(sb)
+        if i_valid.any():
+            ax1.fill_between(cx, sa, sb, where=i_valid & (sa >= sb), interpolate=True,
+                             facecolor='#26a641', alpha=0.15, zorder=0)
+            ax1.fill_between(cx, sa, sb, where=i_valid & (sa < sb), interpolate=True,
+                             facecolor='#f85149', alpha=0.15, zorder=0)
+            ax1.plot(cx[i_valid], sa[i_valid], color='#26a641', lw=0.6, alpha=0.5, zorder=1)
+            ax1.plot(cx[i_valid], sb[i_valid], color='#f85149', lw=0.6, alpha=0.5, zorder=1)
+
+    ax1.set_xlim(-1, n + ichimoku_extra)
     ax1.legend(loc='upper left', fontsize=7, facecolor='#161b22',
                labelcolor='#8b949e', framealpha=0.8)
 
@@ -618,58 +684,60 @@ def plot_chart(data: dict, symbol: str, timeframe: str = '15m',
     ax2.legend(loc='upper left', fontsize=7, facecolor='#161b22',
                labelcolor='#8b949e', framealpha=0.8)
 
-    # ── Pannello 3: RSI ──────────────────────────────────────────────────
-    rsi_valid = ~np.isnan(rsi)
-    if rsi_valid.any():
-        ax3.plot(x[rsi_valid], rsi[rsi_valid], color='#c9d1d9', lw=1.0)
-    ax3.axhline(70, color='#f85149', lw=0.7, ls='--', alpha=0.7)
-    ax3.axhline(30, color='#26a641', lw=0.7, ls='--', alpha=0.7)
-    ax3.fill_between(x[rsi_valid], rsi[rsi_valid], 70,
-                     where=rsi[rsi_valid] >= 70, alpha=0.15, color='#f85149')
-    ax3.fill_between(x[rsi_valid], rsi[rsi_valid], 30,
-                     where=rsi[rsi_valid] <= 30, alpha=0.15, color='#26a641')
-    ax3.set_ylim(0, 100)
-    ax3.set_ylabel('RSI 14', fontsize=8)
-    ax3.set_yticks([30, 50, 70])
+    # ── Pannello RSI (opzionale) ─────────────────────────────────────────
+    if ax3 is not None:
+        rsi_valid = ~np.isnan(rsi)
+        if rsi_valid.any():
+            ax3.plot(x[rsi_valid], rsi[rsi_valid], color='#c9d1d9', lw=1.0)
+        ax3.axhline(70, color='#f85149', lw=0.7, ls='--', alpha=0.7)
+        ax3.axhline(30, color='#26a641', lw=0.7, ls='--', alpha=0.7)
+        ax3.fill_between(x[rsi_valid], rsi[rsi_valid], 70,
+                         where=rsi[rsi_valid] >= 70, alpha=0.15, color='#f85149')
+        ax3.fill_between(x[rsi_valid], rsi[rsi_valid], 30,
+                         where=rsi[rsi_valid] <= 30, alpha=0.15, color='#26a641')
+        ax3.set_ylim(0, 100)
+        ax3.set_ylabel('RSI 14', fontsize=8)
+        ax3.set_yticks([30, 50, 70])
 
-    # ── Pannello 4: MACD ─────────────────────────────────────────────────
-    macd_valid = ~np.isnan(macd_h)
-    if macd_valid.any():
-        mv = macd_h[macd_valid]
-        hist_colors = []
-        for i, v in enumerate(mv):
-            prev = mv[i - 1] if i > 0 else v
-            if v >= 0:
-                # verde pieno = cresce, verde chiaro = indebolisce
-                hist_colors.append('#26a641' if v >= prev else '#74c99a')
-            else:
-                # rosso pieno = cala ulteriormente, rosso chiaro = si riduce
-                hist_colors.append('#f85149' if v <= prev else '#f4a59a')
-        ax4.bar(x[macd_valid], mv, color=hist_colors, alpha=0.85, zorder=2)
-    ml_valid = ~np.isnan(macd_l)
-    ms_valid = ~np.isnan(macd_s)
-    if ml_valid.any():
-        ax4.plot(x[ml_valid], macd_l[ml_valid], color='#58a6ff', lw=1.0, label='MACD')
-    if ms_valid.any():
-        ax4.plot(x[ms_valid], macd_s[ms_valid], color='#ffd700', lw=1.0, label='Signal')
-    ax4.axhline(0, color='#30363d', lw=0.8)
-    ax4.set_ylabel('MACD', fontsize=8)
-    ax4.legend(loc='upper left', fontsize=7, facecolor='#161b22',
-               labelcolor='#8b949e', framealpha=0.8)
+    # ── Pannello MACD (opzionale) ────────────────────────────────────────
+    if ax4 is not None:
+        macd_valid = ~np.isnan(macd_h)
+        if macd_valid.any():
+            mv = macd_h[macd_valid]
+            hist_colors = []
+            for i, v in enumerate(mv):
+                prev = mv[i - 1] if i > 0 else v
+                if v >= 0:
+                    # verde pieno = cresce, verde chiaro = indebolisce
+                    hist_colors.append('#26a641' if v >= prev else '#74c99a')
+                else:
+                    # rosso pieno = cala ulteriormente, rosso chiaro = si riduce
+                    hist_colors.append('#f85149' if v <= prev else '#f4a59a')
+            ax4.bar(x[macd_valid], mv, color=hist_colors, alpha=0.85, zorder=2)
+        ml_valid = ~np.isnan(macd_l)
+        ms_valid = ~np.isnan(macd_s)
+        if ml_valid.any():
+            ax4.plot(x[ml_valid], macd_l[ml_valid], color='#58a6ff', lw=1.0, label='MACD')
+        if ms_valid.any():
+            ax4.plot(x[ms_valid], macd_s[ms_valid], color='#ffd700', lw=1.0, label='Signal')
+        ax4.axhline(0, color='#30363d', lw=0.8)
+        ax4.set_ylabel('MACD', fontsize=8)
+        ax4.legend(loc='upper left', fontsize=7, facecolor='#161b22',
+                   labelcolor='#8b949e', framealpha=0.8)
 
     # ── Asse X ───────────────────────────────────────────────────────────
     x_pos, x_lbl = _x_labels(timestamps, timeframe)
-    plt.setp(ax1.get_xticklabels(), visible=False)
-    plt.setp(ax2.get_xticklabels(), visible=False)
-    plt.setp(ax3.get_xticklabels(), visible=False)
+    time_axes = [ax1, ax2] + ([ax3] if ax3 is not None else []) + ([ax4] if ax4 is not None else [])
+    for ax in time_axes[:-1]:
+        plt.setp(ax.get_xticklabels(), visible=False)
+    last_time_ax = time_axes[-1]
 
-    if pattern_info is not None:
-        plt.setp(ax4.get_xticklabels(), visible=False)
-        ax5 = fig.add_subplot(gs[4])
+    if ax5 is not None:
+        plt.setp(last_time_ax.get_xticklabels(), visible=False)
         _draw_pattern_panel(ax5, opens, highs, lows, closes, n, pattern_info)
     else:
-        ax4.set_xticks(x_pos)
-        ax4.set_xticklabels(x_lbl, rotation=30, ha='right', fontsize=7)
+        last_time_ax.set_xticks(x_pos)
+        last_time_ax.set_xticklabels(x_lbl, rotation=30, ha='right', fontsize=7)
 
     return fig
 
@@ -696,9 +764,16 @@ def main():
     parser.add_argument('--data-dir', default=default_dir,
                         help=f'Directory base dei CSV (default: {default_dir})')
     parser.add_argument('--regression', action='store_true',
-                        help='Disegna il canale di regressione lineare')
+                        help='Disegna il canale di regressione lineare (default: off)')
     parser.add_argument('--regression-bars', type=int, default=120,
                         help='Numero di candele su cui calcolare la regressione (default: 120)')
+    parser.add_argument('--no-macd', dest='macd', action='store_false',
+                        help='Nasconde il pannello MACD (default: mostrato)')
+    parser.add_argument('--no-rsi', dest='rsi', action='store_false',
+                        help='Nasconde il pannello RSI (default: mostrato)')
+    parser.add_argument('--no-ichimoku', dest='ichimoku', action='store_false',
+                        help='Nasconde la nuvola Ichimoku (default: mostrata)')
+    parser.set_defaults(macd=True, rsi=True, ichimoku=True)
     args = parser.parse_args()
 
     symbol    = args.symbol.upper()
@@ -727,7 +802,10 @@ def main():
 
     fig = plot_chart(data, symbol, timeframe,
                      show_regression=args.regression,
-                     regression_bars=args.regression_bars)
+                     regression_bars=args.regression_bars,
+                     show_macd=args.macd,
+                     show_rsi=args.rsi,
+                     show_ichimoku=args.ichimoku)
 
     if args.save:
         fig.savefig(args.save, dpi=110, bbox_inches='tight', facecolor='#0d1117')

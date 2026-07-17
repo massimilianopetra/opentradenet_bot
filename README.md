@@ -287,7 +287,7 @@ Cancella un ordine condizionale tramite il suo ID (visibile in `/orders`).
 
 #### `/chart SYM [N] [TF]`
 
-Grafico candlestick con Bollinger Bands, EMA 9/21/50, RSI, MACD, volume.
+Grafico candlestick con Bollinger Bands, EMA 9/21/50, volume, e — in base alle opzioni configurate con `/chartopt` — RSI, MACD, nuvola Ichimoku e canale di regressione lineare.
 
 ```
 /chart GOLD           — ultime ~120 candele 15m
@@ -296,13 +296,24 @@ Grafico candlestick con Bollinger Bands, EMA 9/21/50, RSI, MACD, volume.
 /chart GOLD 56 1D     — 56 candele daily
 ```
 
-#### `/chartreg on|off`
+#### `/chartopt [opzione] [on|off]`
 
-Attiva o disattiva il canale di regressione lineare (mediana + bande ±2 deviazioni standard, calcolate sulle ultime 120 candele) nel grafico. Preferenza salvata per-utente. Default: off.
+Configura quali indicatori mostrare nel grafico. Preferenza salvata per-utente (persistente tra i riavvii del bot).
+
+Opzioni disponibili:
+
+| Opzione    | Indicatore                              | Default |
+|------------|------------------------------------------|---------|
+| `reg`      | Canale di regressione lineare (120 candele) | off  |
+| `macd`     | Pannello MACD                            | on      |
+| `rsi`      | Pannello RSI                             | on      |
+| `ichimoku` | Nuvola Ichimoku (Senkou Span A/B, proiettata 26 candele avanti) | on |
 
 ```
-/chartreg on    — mostra il canale di regressione
-/chartreg off   — nasconde il canale di regressione
+/chartopt                — mostra lo stato di tutte le opzioni
+/chartopt reg on         — attiva il canale di regressione
+/chartopt macd off       — nasconde il pannello MACD
+/chartopt ichimoku off   — nasconde la nuvola Ichimoku
 ```
 
 ### Analisi AI — `/analyze`
@@ -519,6 +530,8 @@ python3 candle_chart.py GOLD --save gold_chart.png  # salva PNG
 python3 candle_chart.py GOLD --data-dir /altro/path # directory custom
 python3 candle_chart.py GOLD --regression                        # canale di regressione lineare (120 candele)
 python3 candle_chart.py GOLD --timeframe 1D --regression --regression-bars 60  # su 60 candele daily
+python3 candle_chart.py GOLD --no-rsi --no-macd     # nasconde i pannelli RSI e MACD
+python3 candle_chart.py GOLD --no-ichimoku          # nasconde la nuvola Ichimoku (mostrata di default)
 ```
 
 ---

@@ -143,11 +143,22 @@ else:
 DATA_DIR    = Path(os.getenv('DATA_DIR', 'data'))
 wallet_store = WalletStore(DATA_DIR, _enc_key)
 
-# Preferenze grafico per-utente: mostrare il canale di regressione lineare?
-# Persistito in data/chart_prefs/regression.json — caricato in post_init.
-# Default False: il canale è nascosto finché l'utente non fa /chartreg on.
-_CHART_PREFS_FILE: Path = DATA_DIR / 'chart_prefs' / 'regression.json'
-_chart_regression: dict = {}   # chat_id (int) → bool
+# Preferenze grafico per-utente, configurabili con /chartopt <opzione> on|off.
+# Persistito in data/chart_prefs/chart_opts.json — caricato in post_init.
+_CHART_PREFS_FILE: Path = DATA_DIR / 'chart_prefs' / 'chart_opts.json'
+_LEGACY_CHART_PREFS_FILE: Path = DATA_DIR / 'chart_prefs' / 'regression.json'  # vecchio /chartreg
+_chart_opts: dict = {}   # chat_id (int) → {opzione: bool}
+
+CHART_OPTION_DEFAULTS = {
+    'reg':      False,  # canale di regressione lineare
+    'macd':     True,   # pannello MACD
+    'rsi':      True,   # pannello RSI
+    'ichimoku': True,   # nuvola Ichimoku (Senkou Span A/B)
+}
+
+
+def _chart_opt(chat_id: int, name: str) -> bool:
+    return _chart_opts.get(chat_id, {}).get(name, CHART_OPTION_DEFAULTS[name])
 
 # ---------------------------------------------------------------------------
 # Symbols info database
@@ -227,7 +238,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/orders                    — ordini condizionali attivi (TP)\n"
         "/cancelcond ID|SYM|all     — cancella ordine condizionale\n"
         "/chart SYM [N] [TF]       — grafico candele (es: /chart GOLD 72 1H)\n"
-        "/chartreg on|off          — attiva/disattiva canale di regressione lineare nel grafico\n"
+        "/chartopt [opz] [on|off]  — configura opzioni grafico (reg, macd, rsi, ichimoku)\n"
         "/analyze SYM              — analisi tecnica AI daily+15m con setup suggerito\n"
         "/scan                     — scanner (tutti i plugin: vsa/volume/pattern)\n"
         "/scan volume [N]          — top N spike di volume 15m\n"
@@ -770,8 +781,12 @@ async def chart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if _fallback:
                 data = cc.append_live_candle(data, float(_fallback))
 
+        _cid = update.effective_chat.id
         fig = cc.plot_chart(data, symbol, timeframe,
-                            show_regression=_chart_regression.get(update.effective_chat.id, False))
+                            show_regression=_chart_opt(_cid, 'reg'),
+                            show_macd=_chart_opt(_cid, 'macd'),
+                            show_rsi=_chart_opt(_cid, 'rsi'),
+                            show_ichimoku=_chart_opt(_cid, 'ichimoku'))
 
         with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
             tmp_path = tmp.name
@@ -1068,10 +1083,15 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # Genera e invia chart con pannello pattern in fondo
             try:
+                _cid = update.effective_chat.id
                 fig = await asyncio.get_event_loop().run_in_executor(
                     None,
                     lambda: cc.plot_chart(chart_data, symbol, '15m',
-                                          pattern_info=pats)
+                                          pattern_info=pats,
+                                          show_regression=_chart_opt(_cid, 'reg'),
+                                          show_macd=_chart_opt(_cid, 'macd'),
+                                          show_rsi=_chart_opt(_cid, 'rsi'),
+                                          show_ichimoku=_chart_opt(_cid, 'ichimoku'))
                 )
                 with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
                     tmp_path = tmp.name
@@ -2265,7 +2285,10 @@ async def _prepare_order(update, chat_id, symbol, usd, is_buy):
                 _chart_data = cc.append_live_candle(_chart_data, float(price))
             _fig = await asyncio.get_event_loop().run_in_executor(
                 None, lambda: cc.plot_chart(_chart_data, symbol, '15m',
-                                            show_regression=_chart_regression.get(chat_id, False))
+                                            show_regression=_chart_opt(chat_id, 'reg'),
+                                            show_macd=_chart_opt(chat_id, 'macd'),
+                                            show_rsi=_chart_opt(chat_id, 'rsi'),
+                                            show_ichimoku=_chart_opt(chat_id, 'ichimoku'))
             )
             with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as _tmp:
                 _chart_tmp = _tmp.name
@@ -3139,56 +3162,70 @@ async def trade_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------------------------------------------------------------------
 
 def _load_chart_prefs() -> None:
-    """Carica le preferenze canale di regressione da disco in _chart_regression."""
-    global _chart_regression
+    """Carica le preferenze grafico da disco in _chart_opts (con migrazione dal vecchio /chartreg)."""
+    global _chart_opts
     try:
         if _CHART_PREFS_FILE.exists():
             raw = json.loads(_CHART_PREFS_FILE.read_text(encoding='utf-8'))
-            _chart_regression = {int(k): bool(v) for k, v in raw.items()}
-            logger.info(f"chart_prefs caricato: {len(_chart_regression)} utenti")
+            _chart_opts = {int(k): dict(v) for k, v in raw.items()}
+            logger.info(f"chart_prefs caricato: {len(_chart_opts)} utenti")
+        elif _LEGACY_CHART_PREFS_FILE.exists():
+            raw = json.loads(_LEGACY_CHART_PREFS_FILE.read_text(encoding='utf-8'))
+            _chart_opts = {int(k): {'reg': bool(v)} for k, v in raw.items()}
+            _save_chart_prefs()
+            logger.info(f"chart_prefs migrato da regression.json: {len(_chart_opts)} utenti")
     except Exception as e:
         logger.warning(f"chart_prefs load failed: {e}")
-        _chart_regression = {}
+        _chart_opts = {}
 
 
 def _save_chart_prefs() -> None:
-    """Salva _chart_regression su disco."""
+    """Salva _chart_opts su disco."""
     try:
         _CHART_PREFS_FILE.parent.mkdir(parents=True, exist_ok=True)
         _CHART_PREFS_FILE.write_text(
-            json.dumps({str(k): v for k, v in _chart_regression.items()}, indent=2),
+            json.dumps({str(k): v for k, v in _chart_opts.items()}, indent=2),
             encoding='utf-8'
         )
     except Exception as e:
         logger.warning(f"chart_prefs save failed: {e}")
 
 
-async def chartreg_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/chartreg [on|off] — attiva/disattiva il canale di regressione lineare nel grafico."""
-    chat_id = update.effective_chat.id
+async def chartopt_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/chartopt [opzione] [on|off] — configura le opzioni del grafico (reg, macd, rsi, ichimoku)."""
+    chat_id  = update.effective_chat.id
+    opt_list = ', '.join(CHART_OPTION_DEFAULTS)
 
     if not context.args:
-        state = _chart_regression.get(chat_id, False)
-        label  = "attivo"   if state else "nascosto"
-        toggle = "off"      if state else "on"
-        hint   = "nasconderlo" if state else "attivarlo"
+        lines = [f"{name}: {'on' if _chart_opt(chat_id, name) else 'off'}"
+                 for name in CHART_OPTION_DEFAULTS]
         await update.message.reply_text(
-            f"📊 Canale di regressione lineare: {label}\n"
-            f"Usa /chartreg {toggle} per {hint}"
+            "📊 Opzioni grafico:\n" + "\n".join(lines) +
+            f"\n\nUsa /chartopt <opzione> on|off per modificarle.\nOpzioni: {opt_list}"
         )
         return
 
-    arg = context.args[0].lower()
-    if arg == 'on':
-        _chart_regression[chat_id] = True
-        _save_chart_prefs()
-        await update.message.reply_text("📊 Canale di regressione lineare: attivato ✅")
-    elif arg == 'off':
-        _chart_regression[chat_id] = False
-        _save_chart_prefs()
-        await update.message.reply_text("📊 Canale di regressione lineare: nascosto 🔕")
-    else:
-        await update.message.reply_text("Uso: /chartreg on|off")
+    name = context.args[0].lower()
+    if name not in CHART_OPTION_DEFAULTS:
+        await update.message.reply_text(f"Opzione sconosciuta: {name}\nOpzioni valide: {opt_list}")
+        return
+
+    if len(context.args) < 2:
+        state = _chart_opt(chat_id, name)
+        await update.message.reply_text(
+            f"{name}: {'on' if state else 'off'}\nUsa /chartopt {name} on|off per cambiare"
+        )
+        return
+
+    toggle = context.args[1].lower()
+    if toggle not in ('on', 'off'):
+        await update.message.reply_text("Uso: /chartopt <opzione> on|off")
+        return
+
+    _chart_opts.setdefault(chat_id, {})[name] = (toggle == 'on')
+    _save_chart_prefs()
+    label = 'attivato ✅' if toggle == 'on' else 'disattivato 🔕'
+    await update.message.reply_text(f"📊 {name}: {label}")
 
 
 async def post_init(application: Application):
@@ -3632,7 +3669,7 @@ def main():
     app.add_handler(CommandHandler("orders",       orders_command))
     app.add_handler(CommandHandler("cancelcond",   cancelcond_command))
     app.add_handler(CommandHandler("chart",       chart_command))
-    app.add_handler(CommandHandler("chartreg",    chartreg_command))
+    app.add_handler(CommandHandler("chartopt",    chartopt_command))
     app.add_handler(CommandHandler("scan",         scan_command))
     app.add_handler(CommandHandler("analyze",      analyze_command))
     app.add_handler(CommandHandler("scanstop",     scanstop_command))
