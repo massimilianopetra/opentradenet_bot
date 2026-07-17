@@ -154,6 +154,7 @@ CHART_OPTION_DEFAULTS = {
     'macd':     True,   # pannello MACD
     'rsi':      True,   # pannello RSI
     'ichimoku': True,   # nuvola Ichimoku (Senkou Span A/B)
+    'bb':       True,   # Bollinger Bands
 }
 
 
@@ -683,9 +684,9 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 VALID_TIMEFRAMES = {'15m', '1H', '1D'}
 
 DEFAULT_BARS_PER_TF = {
-    '15m': 120,
-    '1H':  120,
-    '1D':  120,
+    '15m': 240,
+    '1H':  240,
+    '1D':  240,
 }
 
 
@@ -696,11 +697,11 @@ async def chart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Uso: `/chart SIMBOLO [BARRE] [TIMEFRAME]`\n\n"
             "Timeframe disponibili: `15m` (default) · `1H` · `1D`\n\n"
             "Esempi:\n"
-            "  `/chart GOLD`          — 15m, ~30h\n"
+            "  `/chart GOLD`          — 15m, ~60h\n"
             "  `/chart GOLD 200`      — 15m, 200 candele\n"
-            "  `/chart GOLD 1H`       — orario, ~5 giorni\n"
+            "  `/chart GOLD 1H`       — orario, ~10 giorni\n"
             "  `/chart GOLD 72 1H`    — orario, 3 giorni\n"
-            "  `/chart GOLD 1D`       — giornaliero, ~4 mesi\n"
+            "  `/chart GOLD 1D`       — giornaliero, ~8 mesi\n"
             "  `/chart GOLD 60 1D`    — giornaliero, 2 mesi",
             parse_mode='Markdown'
         )
@@ -786,7 +787,8 @@ async def chart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             show_regression=_chart_opt(_cid, 'reg'),
                             show_macd=_chart_opt(_cid, 'macd'),
                             show_rsi=_chart_opt(_cid, 'rsi'),
-                            show_ichimoku=_chart_opt(_cid, 'ichimoku'))
+                            show_ichimoku=_chart_opt(_cid, 'ichimoku'),
+                            show_bb=_chart_opt(_cid, 'bb'))
 
         with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
             tmp_path = tmp.name
@@ -1091,7 +1093,8 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                           show_regression=_chart_opt(_cid, 'reg'),
                                           show_macd=_chart_opt(_cid, 'macd'),
                                           show_rsi=_chart_opt(_cid, 'rsi'),
-                                          show_ichimoku=_chart_opt(_cid, 'ichimoku'))
+                                          show_ichimoku=_chart_opt(_cid, 'ichimoku'),
+                                          show_bb=_chart_opt(_cid, 'bb'))
                 )
                 with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
                     tmp_path = tmp.name
@@ -2288,7 +2291,8 @@ async def _prepare_order(update, chat_id, symbol, usd, is_buy):
                                             show_regression=_chart_opt(chat_id, 'reg'),
                                             show_macd=_chart_opt(chat_id, 'macd'),
                                             show_rsi=_chart_opt(chat_id, 'rsi'),
-                                            show_ichimoku=_chart_opt(chat_id, 'ichimoku'))
+                                            show_ichimoku=_chart_opt(chat_id, 'ichimoku'),
+                                            show_bb=_chart_opt(chat_id, 'bb'))
             )
             with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as _tmp:
                 _chart_tmp = _tmp.name

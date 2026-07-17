@@ -290,7 +290,7 @@ Cancella un ordine condizionale tramite il suo ID (visibile in `/orders`).
 Grafico candlestick con Bollinger Bands, EMA 9/21/50, volume, e — in base alle opzioni configurate con `/chartopt` — RSI, MACD, nuvola Ichimoku e canale di regressione lineare.
 
 ```
-/chart GOLD           — ultime ~120 candele 15m
+/chart GOLD           — ultime ~240 candele 15m
 /chart GOLD 200       — 200 candele 15m
 /chart GOLD 60 1H     — 60 candele orarie (ricampionate da 15m)
 /chart GOLD 56 1D     — 56 candele daily
@@ -308,12 +308,14 @@ Opzioni disponibili:
 | `macd`     | Pannello MACD                            | on      |
 | `rsi`      | Pannello RSI                             | on      |
 | `ichimoku` | Nuvola Ichimoku (Senkou Span A/B, proiettata 26 candele avanti) | on |
+| `bb`       | Bollinger Bands                          | on      |
 
 ```
 /chartopt                — mostra lo stato di tutte le opzioni
 /chartopt reg on         — attiva il canale di regressione
 /chartopt macd off       — nasconde il pannello MACD
 /chartopt ichimoku off   — nasconde la nuvola Ichimoku
+/chartopt bb off         — nasconde le Bollinger Bands
 ```
 
 ### Analisi AI — `/analyze`
@@ -524,7 +526,7 @@ timestamp,open,high,low,close,volume
 ### Uso
 
 ```bash
-python3 candle_chart.py GOLD                        # ultime ~120 candele 15m
+python3 candle_chart.py GOLD                        # ultime ~240 candele 15m
 python3 candle_chart.py GOLD --bars 200             # N candele personalizzate
 python3 candle_chart.py GOLD --save gold_chart.png  # salva PNG
 python3 candle_chart.py GOLD --data-dir /altro/path # directory custom
@@ -532,6 +534,7 @@ python3 candle_chart.py GOLD --regression                        # canale di reg
 python3 candle_chart.py GOLD --timeframe 1D --regression --regression-bars 60  # su 60 candele daily
 python3 candle_chart.py GOLD --no-rsi --no-macd     # nasconde i pannelli RSI e MACD
 python3 candle_chart.py GOLD --no-ichimoku          # nasconde la nuvola Ichimoku (mostrata di default)
+python3 candle_chart.py GOLD --no-bb                # nasconde le Bollinger Bands (mostrate di default)
 ```
 
 ---

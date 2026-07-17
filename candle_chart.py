@@ -6,11 +6,11 @@ Aggrega automaticamente le candele a 15m in 1H o 1D prima di plottare.
 Non richiede pandas — usa solo matplotlib e numpy.
 
 Uso standalone:
-    python3 candle_chart.py GOLD                          # 15m, ultime 120 candele (~30h)
+    python3 candle_chart.py GOLD                          # 15m, ultime 240 candele (~60h)
     python3 candle_chart.py GOLD --bars 200               # 15m, 200 candele
-    python3 candle_chart.py GOLD --timeframe 1H           # 1H, ultime 120 ore
+    python3 candle_chart.py GOLD --timeframe 1H           # 1H, ultime 240 ore
     python3 candle_chart.py GOLD --timeframe 1H --bars 72 # 1H, ultime 72 ore (3 giorni)
-    python3 candle_chart.py GOLD --timeframe 1D           # 1D, ultimi 120 giorni
+    python3 candle_chart.py GOLD --timeframe 1D           # 1D, ultimi 240 giorni
     python3 candle_chart.py GOLD --timeframe 1D --bars 60 # 1D, ultimi 60 giorni
     python3 candle_chart.py GOLD --save gold_chart.png    # salva PNG
     python3 candle_chart.py GOLD --data-dir /altro/path   # directory custom
@@ -54,9 +54,9 @@ TF_CANDLES = {
 
 # Default bar counts per timeframe
 DEFAULT_BARS = {
-    '15m': 120,   # ~30 ore
-    '1H':  120,   # 5 giorni
-    '1D':  120,   # ~4 mesi
+    '15m': 240,   # ~60 ore
+    '1H':  240,   # 10 giorni
+    '1D':  240,   # ~8 mesi
 }
 
 # ---------------------------------------------------------------------------
@@ -134,7 +134,7 @@ def resample_rows(rows: list, tf: str) -> list:
 # Lettura CSV + aggregazione
 # ---------------------------------------------------------------------------
 
-def load_csv(csv_path: Path, bars: int = 120, timeframe: str = '15m') -> dict:
+def load_csv(csv_path: Path, bars: int = 240, timeframe: str = '15m') -> dict:
     """
     Legge il CSV delle candele 15m, aggrega nel timeframe richiesto,
     ritorna un dict con arrays numpy pronti per il plot.
@@ -506,12 +506,13 @@ def plot_chart(data: dict, symbol: str, timeframe: str = '15m',
                regression_bars: int = 120,
                show_macd: bool = True,
                show_rsi: bool = True,
-               show_ichimoku: bool = True) -> plt.Figure:
+               show_ichimoku: bool = True,
+               show_bb: bool = True) -> plt.Figure:
     """
-    Genera il grafico candlestick: candele+BB+EMA (+ canale di regressione
-    e/o nuvola Ichimoku, opzionali), volume, e pannelli opzionali RSI/MACD.
-    Se pattern_info non è None aggiunge un pannello con le ultime 5 candele
-    e le etichette dei pattern rilevati.
+    Genera il grafico candlestick: candele+EMA (+ Bollinger Bands, canale di
+    regressione e/o nuvola Ichimoku, tutti opzionali), volume, e pannelli
+    opzionali RSI/MACD. Se pattern_info non è None aggiunge un pannello con
+    le ultime 5 candele e le etichette dei pattern rilevati.
 
     Args:
         data:            output di load_csv()
@@ -529,6 +530,7 @@ def plot_chart(data: dict, symbol: str, timeframe: str = '15m',
         show_ichimoku:   se True disegna la nuvola Ichimoku (Senkou Span A/B,
                          proiettata 26 candele avanti) sul pannello prezzo
                          (default True).
+        show_bb:         se False non disegna le Bollinger Bands (default True).
 
     Returns:
         matplotlib Figure
@@ -546,7 +548,7 @@ def plot_chart(data: dict, symbol: str, timeframe: str = '15m',
     ema9   = _ema(closes, 9)
     ema21  = _ema(closes, 21)
     ema50  = _ema(closes, 50)
-    bb_up, bb_mid, bb_lo = _bollinger(closes, 20, 2.0)
+    bb_up, bb_mid, bb_lo = _bollinger(closes, 20, 2.0) if show_bb else (None, None, None)
     vol_ma = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma[i] = np.mean(volumes[i - 19 : i + 1])
@@ -613,12 +615,13 @@ def plot_chart(data: dict, symbol: str, timeframe: str = '15m',
                 color=live_col, alpha=0.85 if (is_live and i == n - 1) else 1.0, zorder=3)
 
     # Bollinger Bands
-    valid_bb = ~np.isnan(bb_up)
-    if valid_bb.any():
-        ax1.plot(x[valid_bb], bb_up[valid_bb],  color='#58a6ff', lw=0.8, ls='--', alpha=0.6, label='BB up')
-        ax1.plot(x[valid_bb], bb_lo[valid_bb],  color='#58a6ff', lw=0.8, ls='--', alpha=0.6, label='BB lo')
-        ax1.fill_between(x[valid_bb], bb_up[valid_bb], bb_lo[valid_bb],
-                         alpha=0.05, color='#58a6ff')
+    if show_bb:
+        valid_bb = ~np.isnan(bb_up)
+        if valid_bb.any():
+            ax1.plot(x[valid_bb], bb_up[valid_bb],  color='#58a6ff', lw=0.8, ls='--', alpha=0.6, label='BB up')
+            ax1.plot(x[valid_bb], bb_lo[valid_bb],  color='#58a6ff', lw=0.8, ls='--', alpha=0.6, label='BB lo')
+            ax1.fill_between(x[valid_bb], bb_up[valid_bb], bb_lo[valid_bb],
+                             alpha=0.05, color='#58a6ff')
 
     # EMA
     for ema_arr, col, lbl in [(ema9, '#ffd700', 'EMA9'), (ema21, '#ff6b6b', 'EMA21'), (ema50, '#4ecdc4', 'EMA50')]:
@@ -756,7 +759,7 @@ def main():
     parser.add_argument('symbol',
                         help='Simbolo da graficare (es. GOLD, BTC)')
     parser.add_argument('--bars', type=int, default=None,
-                        help='Numero di candele da visualizzare (default: 120 per tutti i TF)')
+                        help='Numero di candele da visualizzare (default: 240 per tutti i TF)')
     parser.add_argument('--timeframe', choices=list(TIMEFRAMES.keys()), default='15m',
                         help='Timeframe: 15m (default), 1H, 1D')
     parser.add_argument('--save',
@@ -773,7 +776,9 @@ def main():
                         help='Nasconde il pannello RSI (default: mostrato)')
     parser.add_argument('--no-ichimoku', dest='ichimoku', action='store_false',
                         help='Nasconde la nuvola Ichimoku (default: mostrata)')
-    parser.set_defaults(macd=True, rsi=True, ichimoku=True)
+    parser.add_argument('--no-bb', dest='bb', action='store_false',
+                        help='Nasconde le Bollinger Bands (default: mostrate)')
+    parser.set_defaults(macd=True, rsi=True, ichimoku=True, bb=True)
     args = parser.parse_args()
 
     symbol    = args.symbol.upper()
@@ -805,7 +810,8 @@ def main():
                      regression_bars=args.regression_bars,
                      show_macd=args.macd,
                      show_rsi=args.rsi,
-                     show_ichimoku=args.ichimoku)
+                     show_ichimoku=args.ichimoku,
+                     show_bb=args.bb)
 
     if args.save:
         fig.savefig(args.save, dpi=110, bbox_inches='tight', facecolor='#0d1117')
