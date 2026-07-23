@@ -203,6 +203,7 @@ sudo systemctl status opentradenet_bot
 | `/positions` | Posizioni aperte correnti con P&L, size, entry, leva |
 | `/trackpositions on\|off` | Attiva/disattiva tracking automatico: notifiche su apertura, modifica e chiusura posizioni |
 | `/setleverage SYM LEVA [xyz] [cross]` | Imposta leva per un simbolo. Il mercato viene auto-rilevato; aggiungi `xyz` se fallisce |
+| `/addmargin SYM IMPORTO` | Aggiunge (o con importo negativo rimuove) margine isolato sulla posizione aperta. Il mercato viene auto-rilevato |
 | `/long SYM IMPORTO` | Apre long per IMPORTO in USD (es. `/long SOL 500`) |
 | `/short SYM IMPORTO` | Apre short |
 | `/close SYM` | Chiude posizione al mercato |
@@ -216,6 +217,14 @@ sudo systemctl status opentradenet_bot
 /setleverage BTC 10            — PERP standard
 /setleverage MSTR 3 xyz cross  — xyz con cross margin
 ```
+
+**Esempi addmargin:**
+```
+/addmargin GOLD 100    — aggiunge $100 di margine isolato
+/addmargin BTC -50     — rimuove $50 di margine isolato
+```
+
+> Funziona solo su posizioni con leva **isolated**: su posizioni cross l'exchange restituisce un errore.
 
 ### Ordini condizionali
 

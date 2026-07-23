@@ -228,6 +228,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/positions        — posizioni aperte su Hyperliquid\n"
         "/trackpositions   — attiva/disattiva tracking automatico posizioni\n"
         "/setleverage SYM LEV [cross] — imposta leva su un simbolo\n"
+        "/addmargin SYM IMPORTO     — aggiunge/rimuove margine isolato (importo negativo per rimuovere)\n"
         "/long SYM IMPORTO          — apre long per $IMPORTO\n"
         "/short SYM IMPORTO         — apre short per $IMPORTO\n"
         "/close SYM [%|importo]     — chiude posizione (tutto/parziale)\n"
@@ -2949,6 +2950,78 @@ async def setleverage(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------------------------------------------------------------
+# Comando addmargin
+# ---------------------------------------------------------------------------
+
+async def addmargin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if not _is_wallet_allowed(chat_id):
+        await update.message.reply_text("❌ Non autorizzato.")
+        return
+
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "💰 *Add Margin*\n\n"
+            "Uso: /addmargin SIMBOLO IMPORTO\n\n"
+            "Aggiunge IMPORTO$ di margine isolato alla posizione aperta su SIMBOLO.\n"
+            "Usa un importo negativo per rimuoverne.\n"
+            "Funziona solo su posizioni con leva *isolated* (non cross).\n"
+            "Il mercato (PERP o xyz) viene auto-rilevato.\n\n"
+            "Esempi:\n"
+            "  /addmargin GOLD 100   — aggiunge $100 di margine\n"
+            "  /addmargin BTC -50    — rimuove $50 di margine",
+            parse_mode='Markdown'
+        )
+        return
+
+    addr = wallet_store.get_address(chat_id)
+    key  = wallet_store.get_key(chat_id)
+    if not addr:
+        await update.message.reply_text("❌ Imposta prima /setaddress")
+        return
+    if not key:
+        await update.message.reply_text("❌ Imposta prima /setkey per usare comandi di trading.")
+        return
+
+    symbol = context.args[0].upper().replace('(XYZ)', '').strip()
+    try:
+        amount = float(context.args[1].replace(',', '.'))
+        if amount == 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("❌ Importo non valido.")
+        return
+
+    dex      = await _detect_dex(symbol)
+    market_s = 'XYZ' if dex else 'PERP'
+    verb     = "Aggiungo" if amount > 0 else "Rimuovo"
+
+    await update.message.reply_text(
+        f"⏳ {verb} ${abs(amount):,.2f} di margine su {symbol} ({market_s})...")
+
+    try:
+        client = HyperliquidClient(addr, private_key=key)
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: client.update_isolated_margin(symbol, amount, dex)
+        )
+        logger.info(f"addmargin {symbol} {amount} ({market_s}) chat {chat_id} -> {result}")
+
+        if isinstance(result, dict) and result.get('status') == 'err':
+            await update.message.reply_text(f"❌ Errore exchange: {result.get('response', result)}")
+            return
+
+        await update.message.reply_text(
+            f"✅ *Margine aggiornato*\n\n"
+            f"Simbolo: *{symbol}* ({market_s})\n"
+            f"{verb}: *${abs(amount):,.2f}*",
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        logger.error(f"Errore addmargin {symbol} chat {chat_id}: {e}")
+        await update.message.reply_text(f"❌ Errore: {e}")
+
+
+# ---------------------------------------------------------------------------
 # Comandi wallet / API Hyperliquid
 # ---------------------------------------------------------------------------
 
@@ -3762,6 +3835,7 @@ def main():
     app.add_handler(CommandHandler("positions",      positions))
     app.add_handler(CommandHandler("trackpositions", trackpositions))
     app.add_handler(CommandHandler("setleverage",    setleverage))
+    app.add_handler(CommandHandler("addmargin",      addmargin_command))
     app.add_handler(CommandHandler("long",           long_command))
     app.add_handler(CommandHandler("short",          short_command))
     app.add_handler(CommandHandler("close",          close_command))

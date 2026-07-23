@@ -278,6 +278,26 @@ class HyperliquidClient:
             exchange = self._get_exchange()
             return exchange.update_leverage(leverage, coin, is_cross)
 
+    def update_isolated_margin(self, coin: str, amount: float, dex: str = '') -> dict:
+        """
+        Aggiunge (amount > 0) o rimuove (amount < 0) margine isolato sulla
+        posizione aperta su `coin`. Funziona solo su posizioni con leva
+        isolated — l'exchange restituisce un errore se la posizione è cross.
+
+        Funziona su perp standard (dex='') e su mercati xyz (dex='xyz'),
+        con lo stesso mapping asset index (offset 110000+) di set_leverage.
+
+        Richiede private key.
+        """
+        if dex:
+            exchange = self._get_exchange_xyz(dex)
+            name     = f"{dex}:{coin.upper()}"
+        else:
+            exchange = self._get_exchange()
+            name     = coin.upper()
+
+        return exchange.update_isolated_margin(amount, name)
+
     def _get_exchange_xyz(self, dex: str):
         """
         Exchange configurato per un dex xyz.
