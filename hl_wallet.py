@@ -116,6 +116,14 @@ class HyperliquidClient:
     """
 
     API_URL = 'https://api.hyperliquid.xyz'
+    # L'SDK hyperliquid-python-sdk usa requests con timeout=None di default,
+    # cioè nessun limite: una richiesta che resta appesa (connessione accettata
+    # ma risposta mai arrivata) blocca per sempre il thread che l'ha chiamata.
+    # Dentro un task in background (es. position_tracking_task) questo blocca
+    # l'intero ciclo senza mai sollevare un'eccezione — nessun log, nessun retry.
+    # Timeout esplicito qui sotto per garantire che una richiesta bloccata
+    # fallisca dopo un tempo ragionevole invece di appendersi indefinitamente.
+    API_TIMEOUT = 15
 
     def __init__(self, account_address: str, private_key: Optional[str] = None):
         self.account_address = account_address.lower()
@@ -126,7 +134,7 @@ class HyperliquidClient:
     def _get_info(self):
         if self._info is None:
             from hyperliquid.info import Info
-            self._info = Info(self.API_URL, skip_ws=True)
+            self._info = Info(self.API_URL, skip_ws=True, timeout=self.API_TIMEOUT)
         return self._info
 
     def _get_exchange(self):
@@ -137,7 +145,8 @@ class HyperliquidClient:
             from hyperliquid.exchange import Exchange
             wallet           = eth_account.Account.from_key(self.private_key)
             self._exchange   = Exchange(wallet, self.API_URL,
-                                        account_address=self.account_address)
+                                        account_address=self.account_address,
+                                        timeout=self.API_TIMEOUT)
         return self._exchange
 
     def get_positions(self, extra_dexs: list = None) -> tuple:
@@ -259,7 +268,7 @@ class HyperliquidClient:
             wallet = eth_account.Account.from_key(self.private_key)
 
             # Info con perp_dexs=[dex] carica i simboli xyz con offset 110000
-            info = Info(self.API_URL, skip_ws=True, perp_dexs=[dex])
+            info = Info(self.API_URL, skip_ws=True, perp_dexs=[dex], timeout=self.API_TIMEOUT)
 
             # Il nome interno è 'xyz:GOLD' (come restituito dall'API meta)
             internal_name = f"{dex}:{coin.upper()}"
@@ -269,6 +278,7 @@ class HyperliquidClient:
                 self.API_URL,
                 account_address=self.account_address,
                 vault_address=None,
+                timeout=self.API_TIMEOUT,
             )
             exchange.info = info
 
@@ -310,10 +320,11 @@ class HyperliquidClient:
         from hyperliquid.exchange import Exchange
         from hyperliquid.info import Info
         wallet   = eth_account.Account.from_key(self.private_key)
-        info     = Info(self.API_URL, skip_ws=True, perp_dexs=[dex])
+        info     = Info(self.API_URL, skip_ws=True, perp_dexs=[dex], timeout=self.API_TIMEOUT)
         exchange = Exchange(wallet, self.API_URL,
                             account_address=self.account_address,
-                            vault_address=None)
+                            vault_address=None,
+                            timeout=self.API_TIMEOUT)
         exchange.info = info
         return exchange
 
