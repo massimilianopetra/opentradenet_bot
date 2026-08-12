@@ -235,7 +235,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/confirm                   — conferma ordine pendente\n"
         "/cancelorder               — annulla ordine pendente\n"
         "/stoploss SYM PX           — stop loss nativo su Hyperliquid\n"
-        "/cancelsl SYM              — cancella stop loss nativo\n"
+        "/trailingsl SYM X% Y%      — stop loss nativo che segue il prezzo\n"
+        "/cancelsl SYM              — cancella stop loss nativo (anche trailing)\n"
         "/takeprofit SYM PX [sz|%]  — take profit con trailing stop\n"
         "/orders                    — ordini condizionali attivi (TP)\n"
         "/cancelcond ID|SYM|all     — cancella ordine condizionale\n"
@@ -1814,13 +1815,21 @@ async def stoploss_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             oid_note = "\n⚠️ oid non ricevuto — per cancellare usa la UI Hyperliquid"
 
+        # Un /stoploss manuale sostituisce un eventuale trailing stop attivo
+        # sullo stesso simbolo, altrimenti il trailing lo rimpiazzerebbe al
+        # prossimo movimento a favore, ignorando questa impostazione manuale.
+        trailing_note = ""
+        if monitor.trailing_stops.get(chat_id, {}).pop(symbol, None) is not None:
+            monitor.save_trailing_stops(chat_id)
+            trailing_note = "\n🔄 Trailing stop loss su questo simbolo disattivato."
+
         await update.message.reply_text(
             f"✅ *Stop Loss nativo inserito*\n\n"
             f"🛑 SL *{symbol}* {market_s} ({direction})\n"
             f"Trigger: ${_fmt(trigger_px)}  _({mode_label})_\n"
             f"Size: {size}\n"
             f"⚙️ Gestito da Hyperliquid — attivo anche offline"
-            f"{oid_note}\n"
+            f"{oid_note}{trailing_note}\n"
             f"⏰ {datetime.now().strftime('%H:%M:%S')}",
             parse_mode='Markdown'
         )
@@ -1844,11 +1853,14 @@ async def cancelsl_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode='Markdown'
             )
             return
+        trailing_map = monitor.trailing_stops.get(chat_id, {})
         lines = []
         for sym, info in sl_map.items():
             mkt   = f"_{info['dex'].upper()}_" if info['dex'] else "PERP"
             dir_s = "L" if info['is_long'] else "S"
-            lines.append(f"🛑 *{sym}* {mkt} ({dir_s}) trigger ${_fmt(info['trigger_px'])}  oid `{info['oid']}`")
+            trail = trailing_map.get(sym)
+            trail_s = f"  🔄 trailing X:{trail['x_pct']}% Y:{trail['y_pct']}%" if trail else ""
+            lines.append(f"🛑 *{sym}* {mkt} ({dir_s}) trigger ${_fmt(info['trigger_px'])}  oid `{info['oid']}`{trail_s}")
         await update.message.reply_text(
             "🛑 *Stop Loss nativi attivi*\n\n" + "\n".join(lines) +
             "\n\nUsa /cancelsl SIMBOLO per cancellarne uno.",
@@ -1898,10 +1910,18 @@ async def cancelsl_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sl_map.pop(symbol, None)
         monitor.save_native_sl_orders(chat_id)
 
+        # Se era un trailing stop, ferma anche il riposizionamento automatico —
+        # altrimenti al prossimo movimento a favore il task lo ripiazzerebbe.
+        trailing_note = ""
+        if monitor.trailing_stops.get(chat_id, {}).pop(symbol, None) is not None:
+            monitor.save_trailing_stops(chat_id)
+            trailing_note = "\n🔄 Trailing stop loss fermato."
+
         await update.message.reply_text(
             f"✅ *Stop Loss cancellato*\n\n"
             f"🛑 SL *{symbol}* {market_s} rimosso dall'exchange\n"
-            f"Trigger era: ${_fmt(sl_info['trigger_px'])}\n"
+            f"Trigger era: ${_fmt(sl_info['trigger_px'])}"
+            f"{trailing_note}\n"
             f"⏰ {datetime.now().strftime('%H:%M:%S')}",
             parse_mode='Markdown'
         )
@@ -1909,6 +1929,176 @@ async def cancelsl_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Errore cancel_stop_loss_native {symbol} oid={oid} chat {chat_id}: {e}")
         await update.message.reply_text(f"❌ Errore: {e}")
+
+
+async def trailingsl_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /trailingsl SIMBOLO X% Y%
+
+    Attiva uno Stop Loss nativo "follower": piazza subito uno SL nativo a X%
+    di distanza dal prezzo attuale, poi — controllato ogni POLL_INTERVAL dentro
+    price_polling_task — ogni volta che il prezzo si muove a favore di almeno
+    Y% rispetto all'ultimo riposizionamento, cancella lo SL nativo esistente e
+    ne piazza uno nuovo a X% dal nuovo prezzo. Resta sempre un ordine reale su
+    Hyperliquid: se il bot va offline l'ultimo SL piazzato protegge comunque
+    la posizione, semplicemente smette di seguire il prezzo finché il bot non
+    torna attivo.
+    """
+    chat_id = update.effective_chat.id
+    if not _is_wallet_allowed(chat_id):
+        await update.message.reply_text("❌ Non autorizzato.")
+        return
+
+    if not context.args:
+        tmap = monitor.trailing_stops.get(chat_id, {})
+        if not tmap:
+            await update.message.reply_text(
+                "ℹ️ Nessun Trailing Stop Loss attivo.\n\n"
+                "Uso: /trailingsl SIMBOLO X% Y%\n"
+                "  X% = distanza mantenuta tra prezzo attuale e stop\n"
+                "  Y% = movimento a favore che fa scattare il riposizionamento\n\n"
+                "Esempio: /trailingsl SPCX 2% 1%",
+                parse_mode='Markdown'
+            )
+            return
+        lines = []
+        for sym, cfg in tmap.items():
+            mkt   = f"_{cfg['dex'].upper()}_" if cfg.get('dex') else "PERP"
+            dir_s = "L" if cfg['is_long'] else "S"
+            lines.append(
+                f"🔄 *{sym}* {mkt} ({dir_s})  X:{cfg['x_pct']}%  Y:{cfg['y_pct']}%\n"
+                f"   Stop attuale: ${_fmt(cfg['sl_trigger_px'])}  rif: ${_fmt(cfg['ref_price'])}"
+            )
+        await update.message.reply_text(
+            "🔄 *Trailing Stop Loss attivi*\n\n" + "\n\n".join(lines) +
+            "\n\nUsa /cancelsl SIMBOLO per fermarne uno.",
+            parse_mode='Markdown'
+        )
+        return
+
+    if len(context.args) < 3:
+        await update.message.reply_text(
+            "🔄 *Trailing Stop Loss*\n\n"
+            "Uso: /trailingsl SIMBOLO X% Y%\n\n"
+            "  X% = distanza mantenuta tra prezzo attuale e stop loss\n"
+            "  Y% = quanto deve muoversi il prezzo a favore prima che lo\n"
+            "       stop venga ripiazzato (cancellato e reinserito)\n\n"
+            "Lo stop resta sempre un ordine *nativo* su Hyperliquid: se il\n"
+            "bot va offline, l'ultimo stop piazzato resta comunque attivo\n"
+            "(smette solo di seguire il prezzo finché il bot non riparte).\n\n"
+            "Esempio:\n"
+            "  /trailingsl SPCX 2% 1%",
+            parse_mode='Markdown'
+        )
+        return
+
+    symbol = context.args[0].upper()
+
+    def _parse_pct(raw: str, label: str) -> float:
+        raw = raw.strip().replace(',', '.')
+        if not raw.endswith('%'):
+            raise ValueError(f"{label} deve essere una percentuale, es. 2%")
+        val = float(raw[:-1])
+        if val <= 0:
+            raise ValueError(f"{label} deve essere positivo")
+        return val
+
+    try:
+        x_pct = _parse_pct(context.args[1], "X")
+        y_pct = _parse_pct(context.args[2], "Y")
+    except ValueError as e:
+        await update.message.reply_text(f"❌ {e}")
+        return
+
+    addr = wallet_store.get_address(chat_id)
+    key  = wallet_store.get_key(chat_id)
+    if not addr:
+        await update.message.reply_text("❌ Imposta prima /setaddress")
+        return
+    if not key:
+        await update.message.reply_text("❌ Imposta prima /setkey per usare comandi di trading.")
+        return
+
+    track = monitor.position_tracks.get(chat_id, {}).get(symbol)
+    if not track:
+        await update.message.reply_text(
+            f"❌ Nessuna posizione aperta su *{symbol}*.\n"
+            f"Apri prima una posizione con /long o /short.",
+            parse_mode='Markdown'
+        )
+        return
+
+    is_long      = track['is_long']
+    price_result = await monitor.get_price(symbol)
+    current_px   = price_result[0] if price_result else monitor.last_prices.get(symbol, track['entry_px'])
+    if not current_px:
+        await update.message.reply_text("❌ Impossibile recuperare il prezzo attuale.")
+        return
+
+    trigger_px = current_px * (1 - x_pct / 100) if is_long else current_px * (1 + x_pct / 100)
+
+    dex      = await _detect_dex(symbol)
+    market_s = f"_{dex.upper()}_" if dex else "PERP"
+
+    await update.message.reply_text(
+        f"⏳ Attivazione Trailing Stop Loss...\n"
+        f"Trigger iniziale: ${_fmt(trigger_px)}  (X:{x_pct}%  Y:{y_pct}%)"
+    )
+
+    try:
+        client = HyperliquidClient(addr, private_key=key)
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: client.set_stop_loss_native(symbol, trigger_px, dex)
+        )
+        logger.info(
+            f"TRAILING SL SET {symbol} trigger=${trigger_px} "
+            f"(X:{x_pct}% Y:{y_pct}%) chat {chat_id}: {result}"
+        )
+
+        if isinstance(result, dict) and result.get('status') == 'err':
+            await update.message.reply_text(f"❌ Errore exchange: {result.get('response', result)}")
+            return
+
+        oid = result.get('_oid')
+        if oid is None:
+            await update.message.reply_text(
+                "⚠️ Stop Loss inserito ma oid non ricevuto — impossibile attivare "
+                "il trailing automatico. Riprova, oppure gestisci lo SL dalla UI Hyperliquid."
+            )
+            return
+
+        monitor.trailing_stops.setdefault(chat_id, {})[symbol] = {
+            'dex':           dex,
+            'is_long':       is_long,
+            'x_pct':         x_pct,
+            'y_pct':         y_pct,
+            'ref_price':     current_px,
+            'sl_oid':        oid,
+            'sl_trigger_px': trigger_px,
+        }
+        monitor.save_trailing_stops(chat_id)
+
+        # Tiene sincronizzato native_sl_orders (usato da /cancelsl e dal listato)
+        monitor.native_sl_orders.setdefault(chat_id, {})[symbol] = {
+            'oid': oid, 'dex': dex, 'trigger_px': trigger_px, 'is_long': is_long,
+        }
+        monitor.save_native_sl_orders(chat_id)
+
+        await update.message.reply_text(
+            f"✅ *Trailing Stop Loss attivato*\n\n"
+            f"🔄 *{symbol}* {market_s} ({'LONG' if is_long else 'SHORT'})\n"
+            f"Stop iniziale: ${_fmt(trigger_px)}  (distanza {x_pct}%)\n"
+            f"Si riposiziona ogni {y_pct}% di movimento a favore.\n"
+            f"⚙️ Ordine nativo su Hyperliquid — resta attivo anche se il bot è offline\n"
+            f"oid: `{oid}` (usa /cancelsl {symbol} per fermarlo)\n"
+            f"⏰ {datetime.now().strftime('%H:%M:%S')}",
+            parse_mode='Markdown'
+        )
+
+    except Exception as e:
+        logger.error(f"Errore trailingsl {symbol} chat {chat_id}: {e}")
+        await update.message.reply_text(f"❌ Errore: {e}")
+
 
 async def takeprofit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _set_conditional(update, context, 'takeprofit')
@@ -3844,6 +4034,7 @@ def main():
     app.add_handler(CallbackQueryHandler(order_callback, pattern="^order_"))
     app.add_handler(CallbackQueryHandler(cond_callback,  pattern="^cond_"))
     app.add_handler(CommandHandler("stoploss",     stoploss_command))
+    app.add_handler(CommandHandler("trailingsl",   trailingsl_command))
     app.add_handler(CommandHandler("takeprofit",   takeprofit_command))
     app.add_handler(CommandHandler("orders",       orders_command))
     app.add_handler(CommandHandler("cancelcond",   cancelcond_command))

@@ -115,6 +115,11 @@ class HyperliquidPriceMonitor:
         # Stop Loss nativi: {chat_id: {symbol: {oid, dex, trigger_px, is_long}}}
         self.native_sl_orders: dict = {}
 
+        # Trailing stop loss nativi: {chat_id: {symbol: {dex, is_long, x_pct, y_pct,
+        #   ref_price, sl_oid, sl_trigger_px}}} — lo SL nativo viene ripiazzato
+        # automaticamente man mano che il prezzo si muove a favore.
+        self.trailing_stops: dict = {}
+
     # ---------------------------------------------------------------------------
     # Sessione HTTP
     # ---------------------------------------------------------------------------
@@ -263,7 +268,7 @@ class HyperliquidPriceMonitor:
         return self.subscribers.get(chat_id, set())
 
     def get_all_monitored_symbols(self) -> Set[str]:
-        """Tutti i simboli attualmente monitorati (subscribe + ordini condizionali + posizioni aperte)."""
+        """Tutti i simboli attualmente monitorati (subscribe + ordini condizionali + posizioni aperte + trailing SL)."""
         result: Set[str] = set()
         for syms in self.subscribers.values():
             result.update(syms)
@@ -272,6 +277,8 @@ class HyperliquidPriceMonitor:
                 result.add(o['coin'])
         for tracks in self.position_tracks.values():
             result.update(tracks.keys())
+        for tmap in self.trailing_stops.values():
+            result.update(tmap.keys())
         return result
 
     # ---------------------------------------------------------------------------
@@ -330,7 +337,7 @@ class HyperliquidPriceMonitor:
         return f"C{self._cond_id_counter:04d}"
 
     def load_all_conditional_orders(self) -> None:
-        """Carica tutti gli ordini condizionali + native SL al boot."""
+        """Carica tutti gli ordini condizionali + native SL (+ trailing) al boot."""
         self._cfg.cond_dir.mkdir(parents=True, exist_ok=True)
         for chat_dir in self._cfg.cond_dir.iterdir():
             if chat_dir.is_dir():
@@ -338,6 +345,7 @@ class HyperliquidPriceMonitor:
                     cid = int(chat_dir.name)
                     self.load_conditional_orders(cid)
                     self.load_native_sl_orders(cid)
+                    self.load_trailing_stops(cid)
                 except Exception:
                     pass
         self._fix_missing_is_long()
@@ -370,6 +378,35 @@ class HyperliquidPriceMonitor:
             logger.info(f"Chat {chat_id}: caricati {len(data)} native SL orders")
         except Exception as e:
             logger.error(f"Errore caricamento native_sl_orders {chat_id}: {e}")
+
+    # ---------------------------------------------------------------------------
+    # Persistenza trailing stop loss
+    # ---------------------------------------------------------------------------
+
+    def _trailing_path(self, chat_id: int) -> Path:
+        p = self._cfg.cond_dir / str(chat_id)
+        p.mkdir(parents=True, exist_ok=True)
+        return p / 'trailing_stops.json'
+
+    def save_trailing_stops(self, chat_id: int) -> None:
+        data = self.trailing_stops.get(chat_id, {})
+        try:
+            self._trailing_path(chat_id).write_text(
+                json.dumps(data, indent=2), encoding='utf-8'
+            )
+        except Exception as e:
+            logger.error(f"Errore salvataggio trailing_stops {chat_id}: {e}")
+
+    def load_trailing_stops(self, chat_id: int) -> None:
+        path = self._trailing_path(chat_id)
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text(encoding='utf-8'))
+            self.trailing_stops[chat_id] = data
+            logger.info(f"Chat {chat_id}: caricati {len(data)} trailing stop")
+        except Exception as e:
+            logger.error(f"Errore caricamento trailing_stops {chat_id}: {e}")
 
     # ---------------------------------------------------------------------------
     # Fix is_long al boot

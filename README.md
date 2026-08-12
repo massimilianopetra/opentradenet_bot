@@ -254,11 +254,22 @@ Se esiste già uno stop loss per quel simbolo, viene sostituito automaticamente.
 
 #### `/cancelsl [SYM]`
 
-Cancella lo stop loss nativo. Senza simbolo cancella tutti.
+Cancella lo stop loss nativo. Senza simbolo mostra la lista di quelli attivi (con l'indicazione 🔄 se governati da un trailing). Se il simbolo cancellato aveva un trailing stop loss attivo, viene fermato anche quello.
 
 ```
-/cancelsl GOLD    — cancella solo GOLD
-/cancelsl         — cancella tutti
+/cancelsl GOLD    — cancella lo SL nativo su GOLD
+/cancelsl         — elenca gli SL nativi attivi
+```
+
+#### `/trailingsl SYM X% Y%`
+
+Stop loss nativo "follower": piazza subito uno SL nativo su Hyperliquid a `X%` di distanza dal prezzo attuale. Da quel momento, ogni `POLL_INTERVAL` secondi, se il prezzo si muove a favore di almeno `Y%` rispetto all'ultimo riposizionamento, il bot cancella lo SL esistente e ne piazza uno nuovo a `X%` dal nuovo prezzo — un vero trailing stop, ma implementato ripiazzando un ordine reale sull'exchange invece che con un'esecuzione a mercato decisa dal bot.
+
+> Resta sempre un ordine *nativo*: se il bot va offline, l'ultimo SL piazzato continua a proteggere la posizione — semplicemente smette di "seguire" il prezzo finché il bot non torna attivo. Impostare un `/stoploss` manuale sullo stesso simbolo disattiva automaticamente il trailing (e viceversa, `/cancelsl` su un simbolo in trailing lo ferma).
+
+```
+/trailingsl SPCX 2% 1%   — SL iniziale al 2% dal prezzo, si sposta ogni 1% di guadagno
+/trailingsl              — elenca i trailing stop loss attivi
 ```
 
 #### `/takeprofit SYM VALORE [SIZE%]`

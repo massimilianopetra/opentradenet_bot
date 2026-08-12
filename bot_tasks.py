@@ -460,6 +460,122 @@ async def price_polling_task(application) -> None:
                                 else:
                                     logger.error(f"Errore cond alert {oid} chat {cid}: {e}")
 
+                # ── 3bis. TRAILING STOP LOSS NATIVO ──────────────────────────────
+                if monitor.trailing_stops:
+                    if not all_prices:
+                        all_prices = await monitor.fetch_all_prices()
+
+                    for cid, tmap in list(monitor.trailing_stops.items()):
+                        for coin, cfg in list(tmap.items()):
+                            price_info = all_prices.get(coin)
+                            if not price_info:
+                                continue
+                            current_px = price_info[0]
+                            is_long    = cfg['is_long']
+                            ref_price  = cfg.get('ref_price')
+                            if not ref_price or ref_price <= 0:
+                                continue
+
+                            moved_pct = (
+                                (current_px - ref_price) / ref_price * 100 if is_long
+                                else (ref_price - current_px) / ref_price * 100
+                            )
+                            if moved_pct < cfg['y_pct']:
+                                continue
+
+                            new_trigger = (
+                                current_px * (1 - cfg['x_pct'] / 100) if is_long
+                                else current_px * (1 + cfg['x_pct'] / 100)
+                            )
+                            old_trigger = cfg['sl_trigger_px']
+                            # Ripiazza solo se il nuovo trigger è davvero più
+                            # favorevole di quello attuale (evita cicli inutili
+                            # dovuti agli arrotondamenti al tick size).
+                            improved = (
+                                new_trigger > old_trigger if is_long
+                                else new_trigger < old_trigger
+                            )
+                            if not improved:
+                                continue
+
+                            addr = wallet_store.get_address(cid)
+                            key  = wallet_store.get_key(cid)
+                            if not addr or not key:
+                                continue
+
+                            dex = cfg.get('dex', '')
+                            try:
+                                client = HyperliquidClient(addr, private_key=key)
+
+                                # Piazza il nuovo SL PRIMA di cancellare il vecchio:
+                                # la posizione non resta mai scoperta, nemmeno per
+                                # un istante, se il nuovo piazzamento fallisce.
+                                new_result = await asyncio.get_event_loop().run_in_executor(
+                                    None, lambda: client.set_stop_loss_native(coin, new_trigger, dex)
+                                )
+                                if isinstance(new_result, dict) and new_result.get('status') == 'err':
+                                    logger.error(
+                                        f"TRAILING SL {coin} chat {cid}: "
+                                        f"errore piazzamento nuovo SL: {new_result}"
+                                    )
+                                    continue
+
+                                new_oid = new_result.get('_oid')
+                                if new_oid is None:
+                                    logger.warning(
+                                        f"TRAILING SL {coin} chat {cid}: oid non ricevuto, "
+                                        f"salto la cancellazione del vecchio SL per sicurezza"
+                                    )
+                                    continue
+
+                                old_oid = cfg['sl_oid']
+                                try:
+                                    await asyncio.get_event_loop().run_in_executor(
+                                        None, lambda: client.cancel_stop_loss_native(coin, old_oid, dex)
+                                    )
+                                except Exception as _ce:
+                                    logger.warning(
+                                        f"TRAILING SL {coin} chat {cid}: cancellazione vecchio "
+                                        f"SL oid={old_oid} fallita (probabile già eseguito/assente): {_ce}"
+                                    )
+
+                                cfg['ref_price']     = current_px
+                                cfg['sl_oid']        = new_oid
+                                cfg['sl_trigger_px'] = new_trigger
+                                monitor.save_trailing_stops(cid)
+
+                                # Tiene sincronizzato native_sl_orders (usato da /cancelsl)
+                                monitor.native_sl_orders.setdefault(cid, {})[coin] = {
+                                    'oid': new_oid, 'dex': dex,
+                                    'trigger_px': new_trigger, 'is_long': is_long,
+                                }
+                                monitor.save_native_sl_orders(cid)
+
+                                logger.info(
+                                    f"TRAILING SL {coin} chat {cid}: ripiazzato a "
+                                    f"${new_trigger:.6g} (prezzo ${current_px:.6g}, "
+                                    f"mosso {moved_pct:+.2f}%)"
+                                )
+
+                                try:
+                                    dir_s = "LONG" if is_long else "SHORT"
+                                    await application.bot.send_message(
+                                        chat_id=cid,
+                                        text=(
+                                            f"🔄 *Trailing Stop Loss aggiornato*\n\n"
+                                            f"*{coin}* ({dir_s})\n"
+                                            f"Nuovo stop: ${_fmt(new_trigger)}\n"
+                                            f"Prezzo attuale: ${_fmt(current_px)}\n"
+                                            f"⏰ {datetime.now().strftime('%H:%M:%S')}"
+                                        ),
+                                        parse_mode='Markdown'
+                                    )
+                                except Exception as e:
+                                    logger.error(f"Errore notifica trailing SL {coin} chat {cid}: {e}")
+
+                            except Exception as e:
+                                logger.error(f"Errore trailing SL {coin} chat {cid}: {e}")
+
                 # ── 4. PRICESPIKE ────────────────────────────────────────────────
                 if monitor.spike_subscribers:
                     xyz_syms = set()
@@ -734,6 +850,15 @@ async def position_tracking_task(application) -> None:
                             f"per {coin} chiuso"
                         )
 
+                    # Rimuove anche l'eventuale trailing stop loss residuo:
+                    # la posizione non esiste più, non c'è più nulla da seguire.
+                    removed_trailing = (
+                        monitor.trailing_stops.get(chat_id, {}).pop(coin, None) is not None
+                    )
+                    if removed_trailing:
+                        monitor.save_trailing_stops(chat_id)
+                        logger.info(f"Trailing stop loss rimosso per {coin} chiuso -> chat {chat_id}")
+
                     # Prezzo corrente per log_close
                     current_price = monitor.last_prices.get(coin, track['entry_px'])
 
@@ -757,6 +882,8 @@ async def position_tracking_task(application) -> None:
                             f"\n🗑 Rimossi {len(removed_oids)} ordini condizionali"
                             if removed_oids else ""
                         )
+                        if removed_trailing:
+                            cond_note += "\n🔄 Trailing stop loss fermato"
                         dir_s = "LONG" if track['is_long'] else "SHORT"
                         dex_s = (
                             f"_{track['dex'].upper()}_"
